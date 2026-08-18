@@ -1,0 +1,13 @@
+menu "Example Configuration"
+
+    config EXAMPLE_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        default "mqtt://test.mosquitto.org:1883"
+        help
+            URI of the MQTT broker to connect to.
+
+            - Public test broker (no setup, not private): mqtt://test.mosquitto.org:1883
+            - A broker on your own network (e.g. Mosquitto running on a PC/Raspberry Pi):
+              mqtt://<that device's LAN IP>:1883
+
+endmenu
