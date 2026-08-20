@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "esp_crt_bundle.h"
 #include "mqtt_client.h"
 #include "protocol_examples_common.h"
 
@@ -64,6 +65,7 @@ static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
+        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
