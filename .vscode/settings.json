@@ -1,5 +1,16 @@
 {
-  "idf.currentSetup": "${workspaceFolder}/esp-idf",
+  "idf.currentSetup": "/home/wesleywu9/.espressif/v6.1-beta1/esp-idf",
   "idf.flashType": "UART",
-  "idf.port": "/dev/ttyUSB0"
+  "idf.port": "/dev/ttyUSB0",
+  "idf.customExtraVars": {},
+  "idf.openOcdConfigs": [
+    "interface/ftdi/esp32_devkitj_v1.cfg",
+    "target/esp32.cfg"
+  ],
+  "clangd.path": "/home/wesleywu9/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/wesleywu9/Projects/Conveyor-Monitor/build"
+  ]
 }
