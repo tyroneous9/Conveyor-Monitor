@@ -1,10 +1,3 @@
 {
-  "idf.currentSetup": "${env:HOME}/.espressif/v6.1-beta1/esp-idf",
-  "idf.flashType": "UART",
-  "idf.port": "/dev/ttyUSB0",
-  "idf.customExtraVars": {},
-  "idf.openOcdConfigs": [
-    "interface/ftdi/esp32_devkitj_v1.cfg",
-    "target/esp32.cfg"
-  ],
+  "idf.currentSetup": "/home/wesleywu9/.espressif/v6.0/esp-idf"
 }
