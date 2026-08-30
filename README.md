@@ -1,6 +1,6 @@
 # Conveyor Monitor
 
-Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibration
+Predictive maintenance for an industrial conveyor belt: a ESP32 samples vibration
 off an MPU6050 accelerometer, streams it over MQTT to a
 Raspberry Pi, and a decoupled batch job turns each window into a frequency
 spectrum via FFT. The eventual goal is catching belt wear from how the

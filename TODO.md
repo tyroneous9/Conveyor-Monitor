@@ -121,6 +121,27 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       section) once raw FFT output has been sanity-checked by eye against
       expected mechanical frequencies — the DB now makes that possible, but
       nothing reads `fft_results` yet.
+- [x] Fake data generator (`backend/seed_fake_data.py`): dev/test utility,
+      not part of the production ingest→analyze path. Writes synthetic
+      windows straight into `raw_windows` via the same `storage.store_window`
+      `ingest.py` uses (extended with an optional `received_at` override so
+      a multi-window session can be backdated over simulated time instead of
+      real sleeps), so downstream code needs no special-casing. Supports
+      `--condition healthy|worn`: motor-fundamental content is the same in
+      both, belt-pass-frequency content is what differs (small when healthy,
+      boosted with harmonics when worn) — modeling README §4's actual
+      description of what a worn belt does to a spectrum, not just "add
+      noise." Verified end-to-end (seed → `analyze_fft.py` →
+      `explore_spectra.ipynb`): healthy consistently peaks at the motor
+      fundamental (~29.3Hz, amplitude ~3), worn consistently peaks at
+      belt-pass frequency (~7.8Hz, amplitude ~20-24, >20x healthy) with
+      harmonics visible in the spectrum plot, and the peak-over-time plot
+      shows two clean, stable, separated device traces. (First pass gave
+      healthy belt-pass content the same amplitude as the motor fundamental,
+      which made the peak flicker between the two per-window instead of
+      settling on the motor fundamental — fixed by making healthy's
+      belt-pass amplitude clearly subordinate, as a real healthy belt's
+      would be.)
 
 ## Signal processing / inference (deferred — separate from the backend above)
 

@@ -57,14 +57,18 @@ def connect(db_path):
     return conn
 
 
-def store_window(conn, device_id, payload):
-    """Write one raw accel window as-is. Returns the new row's id."""
+def store_window(conn, device_id, payload, received_at=None):
+    """Write one raw accel window as-is. Returns the new row's id.
+
+    received_at defaults to now; callers backdating synthetic sessions
+    (see backend/seed_fake_data.py) can override it.
+    """
     cur = conn.execute(
         "INSERT INTO raw_windows (device_id, received_at, sample_rate_hz, ax, ay, az) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (
             device_id,
-            time.time(),
+            received_at if received_at is not None else time.time(),
             payload["sample_rate_hz"],
             json.dumps(payload["ax"]),
             json.dumps(payload["ay"]),
