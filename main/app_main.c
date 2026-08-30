@@ -4,15 +4,22 @@
  * What this does:
  *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
  *   2. Connects to a plain (non-TLS) MQTT broker
- *   3. Every few seconds, reads the MPU6050 accelerometer and publishes it
+ *   3. Samples the MPU6050 accelerometer at a fixed rate (esp_timer, not the
+ *      FreeRTOS tick -- see the comment on s_sample_timer) into one of two
+ *      alternating window buffers, and publishes each full window as one
+ *      JSON message to sensors/<device_id>/vibration/raw. See
+ *      backend/ingest.py for the consumer side of this exact contract.
  */
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -24,12 +31,34 @@
 
 static const char *TAG = "conveyor_monitor";
 
-#define SENSOR_TOPIC "conveyor/sensor/accel"
-#define PUBLISH_INTERVAL_MS 5000
+#define SAMPLE_RATE_HZ CONFIG_SAMPLE_RATE_HZ
+#define WINDOW_SIZE CONFIG_SAMPLE_WINDOW_SIZE
+
+/* Generous per-value budget (sign, 4 decimals, comma) so this always fits
+ * whatever WINDOW_SIZE is configured to, instead of a fixed guess that could
+ * silently become too small if WINDOW_SIZE changes. */
+#define JSON_BUFFER_SIZE (WINDOW_SIZE * 3 * 20 + 128)
+
+typedef struct {
+    float ax[WINDOW_SIZE];
+    float ay[WINDOW_SIZE];
+    float az[WINDOW_SIZE];
+} sample_window_t;
 
 static esp_mqtt_client_handle_t s_mqtt_client;
 static volatile bool s_mqtt_connected;
 static mpu6050_handle_t s_mpu6050;
+static char s_device_topic[64];
+static esp_timer_handle_t s_sample_timer;
+static TaskHandle_t s_publish_task_handle;
+static char s_json_buf[JSON_BUFFER_SIZE];
+
+/* Double-buffered so a slow MQTT publish (network I/O, in publish_task)
+ * never blocks or delays the next sample due (in sample_timer_cb) -- the
+ * timer keeps filling the other buffer while the full one is being sent. */
+static sample_window_t s_windows[2];
+static volatile int s_fill_buf;
+static int s_fill_index;
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -62,6 +91,14 @@ static void mqtt_app_start(void)
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+        /* Default buffer is sized for small example payloads, not a whole
+         * JSON sample window -- match it to what we actually send. */
+        .buffer.size = JSON_BUFFER_SIZE,
+        /* Default is 120s; the network here is a phone hotspot, which can
+         * idle-timeout/drop the radio to save battery -- keep traffic
+         * frequent enough that it doesn't look idle (see TODO.md). The
+         * client pings at roughly half this interval. */
+        .session.keepalive = 30,
     };
 
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -69,23 +106,105 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(s_mqtt_client);
 }
 
-static void sensor_publish_task(void *arg)
+static void build_device_topic(void)
+{
+    uint8_t mac[6] = {0};
+    esp_err_t err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_read_mac failed: %s, using a placeholder device id", esp_err_to_name(err));
+    }
+    snprintf(s_device_topic, sizeof(s_device_topic),
+             "sensors/esp32-%02x%02x%02x/vibration/raw", mac[3], mac[4], mac[5]);
+}
+
+/* Appends "<key>":[<v0>,<v1>,...] at *poffset. Returns false (without
+ * modifying *poffset) if it would overflow buf_size. */
+#define APPEND(...) do { \
+        int _n = snprintf(buf + offset, buf_size - offset, __VA_ARGS__); \
+        if (_n < 0 || (size_t)_n >= buf_size - offset) { return false; } \
+        offset += (size_t)_n; \
+    } while (0)
+
+static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
+                                const char *key, const float *values, int n)
+{
+    size_t offset = *poffset;
+    APPEND("\"%s\":[", key);
+    for (int i = 0; i < n; i++) {
+        APPEND(i == 0 ? "%.4f" : ",%.4f", values[i]);
+    }
+    APPEND("]");
+    *poffset = offset;
+    return true;
+}
+
+static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_size, size_t *out_len)
+{
+    size_t offset = 0;
+    APPEND("{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
+    if (!append_float_array(buf, buf_size, &offset, "ax", win->ax, WINDOW_SIZE)) return false;
+    APPEND(",");
+    if (!append_float_array(buf, buf_size, &offset, "ay", win->ay, WINDOW_SIZE)) return false;
+    APPEND(",");
+    if (!append_float_array(buf, buf_size, &offset, "az", win->az, WINDOW_SIZE)) return false;
+    APPEND("}");
+    *out_len = offset;
+    return true;
+}
+
+#undef APPEND
+
+static void publish_task(void *arg)
 {
     (void)arg;
-    char payload[48];
+    uint32_t ready_buf;
 
     while (1) {
-        mpu6050_measurements_t accel;
-        esp_err_t err = mpu6050_read_accel(s_mpu6050, &accel);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
-        } else if (s_mqtt_connected) {
-            int len = snprintf(payload, sizeof(payload), "%.3f,%.3f,%.3f",
-                                accel.accel_x, accel.accel_y, accel.accel_z);
-            esp_mqtt_client_publish(s_mqtt_client, SENSOR_TOPIC, payload, len, /*qos=*/1, /*retain=*/0);
-            ESP_LOGI(TAG, "Published %s = %s", SENSOR_TOPIC, payload);
+        if (xTaskNotifyWait(0, 0, &ready_buf, portMAX_DELAY) != pdTRUE) {
+            continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(PUBLISH_INTERVAL_MS));
+        if (!s_mqtt_connected) {
+            ESP_LOGW(TAG, "MQTT not connected, dropping window");
+            continue;
+        }
+
+        size_t len;
+        if (!build_window_json(&s_windows[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
+            ESP_LOGE(TAG, "Window JSON exceeded %d-byte buffer, dropping window", JSON_BUFFER_SIZE);
+            continue;
+        }
+
+        esp_mqtt_client_publish(s_mqtt_client, s_device_topic, s_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
+        ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
+    }
+}
+
+/* Runs in the esp_timer task at a fixed SAMPLE_RATE_HZ, independent of the
+ * FreeRTOS tick rate (CONFIG_FREERTOS_HZ=100 here, i.e. 10ms resolution --
+ * far too coarse for e.g. a 500Hz/2ms sample period). Kept minimal (one I2C
+ * read, one buffer write) so it doesn't fall behind its own schedule; the
+ * slow part (JSON + network publish) happens in publish_task instead. */
+static void sample_timer_cb(void *arg)
+{
+    (void)arg;
+    mpu6050_measurements_t accel;
+    esp_err_t err = mpu6050_read_accel(s_mpu6050, &accel);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
+        return;
+    }
+
+    sample_window_t *buf = &s_windows[s_fill_buf];
+    buf->ax[s_fill_index] = accel.accel_x;
+    buf->ay[s_fill_index] = accel.accel_y;
+    buf->az[s_fill_index] = accel.accel_z;
+    s_fill_index++;
+
+    if (s_fill_index >= WINDOW_SIZE) {
+        int ready_buf = s_fill_buf;
+        s_fill_buf = 1 - s_fill_buf;
+        s_fill_index = 0;
+        xTaskNotify(s_publish_task_handle, (uint32_t)ready_buf, eSetValueWithOverwrite);
     }
 }
 
@@ -94,6 +213,8 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    build_device_topic();
 
     const mpu6050_config_t mpu6050_cfg = {
         .sda_io_num = CONFIG_MPU6050_SDA_GPIO,
@@ -109,5 +230,12 @@ void app_main(void)
 
     mqtt_app_start();
 
-    xTaskCreate(sensor_publish_task, "sensor_publish", 4096, NULL, 5, NULL);
+    xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, &s_publish_task_handle);
+
+    const esp_timer_create_args_t timer_args = {
+        .callback = sample_timer_cb,
+        .name = "sample_timer",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_sample_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, 1000000 / SAMPLE_RATE_HZ));
 }

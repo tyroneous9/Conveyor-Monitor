@@ -8,23 +8,31 @@ yet (storage.fetch_unanalyzed_windows), computes a spectrum per axis
 the fft_results table.
 
 Run it whenever you want to catch up on analysis -- after a capture
-session, or on a cron schedule. It's idempotent: already-analyzed windows
-are skipped, so re-running is always safe.
+session, by hand, or continuously with --watch. It's idempotent:
+already-analyzed windows are skipped, so re-running (or overlapping runs)
+is always safe.
 
 Usage:
     pip install -r requirements.txt
     FFT_DB_PATH=<path> python3 analyze_fft.py [--limit N]
+    FFT_DB_PATH=<path> python3 analyze_fft.py --watch 30   # loop every 30s
 """
 
 import argparse
 import logging
 import os
+import time
 
 import numpy as np
 
 import storage
 
-DB_PATH = os.environ.get("FFT_DB_PATH", "fft_backend.sqlite3")
+# Anchored to this script's own directory, not the process's cwd -- see the
+# matching comment in ingest.py. ingest.py and analyze_fft.py must resolve
+# to the same file even when launched independently (e.g. one as a service,
+# the other from cron) with different working directories.
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_backend.sqlite3")
+DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 AXES = ("ax", "ay", "az")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -55,13 +63,8 @@ def analyze_window(window):
     return result, peak
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=100, help="max windows to process per run")
-    args = parser.parse_args()
-
-    conn = storage.connect(DB_PATH)
-    windows = storage.fetch_unanalyzed_windows(conn, limit=args.limit)
+def run_once(conn, limit):
+    windows = storage.fetch_unanalyzed_windows(conn, limit=limit)
     log.info("found %d unanalyzed window(s) in %s", len(windows), DB_PATH)
 
     for window in windows:
@@ -72,7 +75,29 @@ def main():
             window["window_id"], window["device_id"], peak[1], peak[0], peak[2],
         )
 
-    log.info("done")
+    return len(windows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--limit", type=int, default=100, help="max windows to process per run")
+    parser.add_argument(
+        "--watch", type=float, default=None, metavar="SECONDS",
+        help="keep running, checking for new windows every SECONDS instead of exiting after one pass",
+    )
+    args = parser.parse_args()
+
+    conn = storage.connect(DB_PATH)
+
+    if args.watch is None:
+        run_once(conn, args.limit)
+        log.info("done")
+        return
+
+    log.info("watching %s every %.0fs (Ctrl+C to stop)", DB_PATH, args.watch)
+    while True:
+        run_once(conn, args.limit)
+        time.sleep(args.watch)
 
 
 if __name__ == "__main__":

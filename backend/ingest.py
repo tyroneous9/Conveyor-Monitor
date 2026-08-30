@@ -30,7 +30,17 @@ import storage
 
 BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "localhost")
 BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
-DB_PATH = os.environ.get("FFT_DB_PATH", "fft_backend.sqlite3")
+# Anchored to this script's own directory, not the process's cwd -- ingest.py
+# and analyze_fft.py are meant to run as separate, independently-launched
+# processes (e.g. one as a long-running service, the other from cron), and a
+# bare relative filename would silently point them at two different files if
+# they're started from different working directories.
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_backend.sqlite3")
+DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
+# Stable, not the paho-generated random default: a persistent session (see
+# clean_session=False in main()) is only useful if the broker recognizes the
+# same client reconnecting.
+CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "conveyor-ingest")
 RAW_TOPIC_FILTER = "sensors/+/vibration/raw"
 AXES = ("ax", "ay", "az")
 
@@ -45,8 +55,14 @@ def validate_payload(payload):
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    log.info("connected to %s:%d (reason=%s)", BROKER_HOST, BROKER_PORT, reason_code)
-    client.subscribe(RAW_TOPIC_FILTER, qos=0)
+    log.info("connected to %s:%d as %s (reason=%s)", BROKER_HOST, BROKER_PORT, CLIENT_ID, reason_code)
+    # QoS 1 to match the firmware's publish QoS -- effective delivery is
+    # min(publish qos, subscribe qos), so subscribing at 0 would silently
+    # downgrade every window to at-most-once regardless of what the ESP32
+    # sends. Combined with clean_session=False below, the broker holds
+    # QoS>=1 messages published while this client is offline and redelivers
+    # them on reconnect instead of dropping them.
+    client.subscribe(RAW_TOPIC_FILTER, qos=1)
 
 
 def on_message(client, userdata, msg):
@@ -77,7 +93,7 @@ def main():
     conn = storage.connect(DB_PATH)
     log.info("storing to %s", DB_PATH)
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID, clean_session=False)
     client.user_data_set(conn)
     client.on_connect = on_connect
     client.on_message = on_message

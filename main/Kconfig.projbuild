@@ -28,4 +28,23 @@ menu "Example Configuration"
         help
             I2C clock speed used to talk to the MPU6050.
 
+    config SAMPLE_RATE_HZ
+        int "Accelerometer sample rate (Hz)"
+        default 500
+        help
+            Fixed sample rate for the vibration window buffer, driven by a
+            hardware-backed esp_timer (not the FreeRTOS tick, which at
+            CONFIG_FREERTOS_HZ=100 is too coarse for rates like this).
+            Should eventually be picked against Nyquist once target
+            mechanical frequencies (motor RPM, belt-pass frequency) are
+            known -- see TODO.md.
+
+    config SAMPLE_WINDOW_SIZE
+        int "Samples per published window"
+        default 256
+        help
+            Number of samples buffered per axis before publishing one MQTT
+            window as JSON. A power of two is recommended (not required) --
+            most FFT implementations are radix-2 and prefer it.
+
 endmenu
