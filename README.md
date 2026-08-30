@@ -8,6 +8,40 @@ vibration signature drifts over time, before it causes downtime — this repo
 covers the sensing → transport → storage → spectrum pipeline; baseline
 capture and fault classification are the next phase (see [Status](#status)).
 
+## Analysis results
+
+Real output from `backend/analyze_fft.py` on 40 windows (20 healthy, 20 worn
+— synthetic test data, see [Status](#status)), plotted with
+`analysis/generate_figures.py` (matplotlib + scipy, static PNGs, no
+interactivity or external hosting involved).
+
+![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
+
+The belt-pass frequency (7.8 Hz) is where a worn belt actually shows up —
+the motor's own rotation frequency (29.3 Hz) barely moves between
+conditions. Same finding in the raw signal, before any transform, though
+far less obvious by eye than in frequency space:
+
+![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
+
+Across all 20 independent windows per condition, not just one cherry-picked
+window:
+
+![Repeatability across independent windows](analysis/figures/repeatability.png)
+
+| Metric | Healthy (n=20) | Worn (n=20) | Welch's t-test |
+|---|---|---|---|
+| Peak frequency (Hz) | 29.30 ± 0.00 | 7.81 ± 0.00 | identical every window (0 variance) — t-test undefined |
+| Peak amplitude (g) | 3.12 ± 0.22 | 21.93 ± 1.41 | t=-57.4, p=1.43e-23 |
+
+Peak frequency is quantized to an FFT bin, so with this little jitter every
+window in a session lands on the same bin — reported as-is rather than
+forcing a significance test onto zero-variance data. Peak amplitude is
+continuous and the separation is real: p ≈ 1.4×10⁻²³.
+
+Regenerate with `pip install -r analysis/requirements.txt && python3
+analysis/generate_figures.py`.
+
 ## Architecture
 
 ```mermaid
@@ -31,7 +65,7 @@ through the database, not through MQTT or a shared queue — see
 main/            ESP-IDF firmware: fixed-rate sampling, windowing, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
-analysis/        Jupyter notebook for exploratory spectrum plotting
+analysis/        Jupyter notebook + static report figures (matplotlib/scipy)
 TODO.md          Working engineering log: open items, decisions, rationale
 ```
 
@@ -92,6 +126,7 @@ problems without touching the router config.
 | FFT analysis (`analyze_fft.py`) | Implemented, verified end-to-end against synthetic multi-window data, including idempotency on re-run |
 | Local broker deployment | Not yet done — currently pointed at a public cloud broker as an interim step |
 | Spectrum exploration notebook | Implemented, executes cleanly against the real schema |
+| Static report figures (`generate_figures.py`) | Implemented, run against the real database — see [Analysis results](#analysis-results) |
 | Baseline capture, feature extraction, fault detection | Not started — intentionally deferred until there's real sensor data to develop it against |
 
 ## Getting started
@@ -108,8 +143,10 @@ MQTT_BROKER_HOST=<broker-host> python3 backend/ingest.py       # long-running
 python3 backend/analyze_fft.py --watch 30                      # or run once without --watch
 ```
 
-**Analysis** — `pip install -r analysis/requirements.txt`, open
-`analysis/explore_spectra.ipynb`.
+**Analysis** — `pip install -r analysis/requirements.txt`; open
+`analysis/explore_spectra.ipynb` for interactive exploration, or run
+`python3 analysis/generate_figures.py` to regenerate the static report
+figures under [Analysis results](#analysis-results).
 
 ## Roadmap
 

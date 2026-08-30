@@ -157,6 +157,20 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       threshold/anomaly detection logic yet — deliberately not building that
       blind, without real spectra to develop it against (README's own "don't
       optimize before you've proven the concept").
+- [x] Static report figures (`analysis/generate_figures.py`): matplotlib +
+      scipy, run against the real `backend/fft_backend.sqlite3`, output
+      embedded directly in README.md (`analysis/figures/*.png` +
+      `summary_table.md`). Deliberately plain PNGs, not an interactive page —
+      an earlier interactive HTML/JS build (SVG charts, hover tooltips, a
+      `docs/` GitHub Pages setup) was built, then removed at the user's
+      request in favor of this. Caught by scipy itself on first run: peak
+      frequency is quantized to an FFT bin, and with this dataset's small
+      per-window jitter every window in a session lands on the *same* bin —
+      zero variance in both groups, so `scipy.stats.ttest_ind` degenerates to
+      `t=inf` with a precision-loss warning. Fixed by detecting the
+      zero-variance case and reporting it as a plain fact instead of forcing
+      a t-test onto it; peak amplitude (continuous, real variance) gets the
+      real Welch's t-test: t=-57.4, p=1.4×10⁻²³.
 - [ ] Feature extraction, baseline capture, and threshold/anomaly detection
       go in this same notebook once there's real hardware data to develop
       them against.
