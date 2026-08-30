@@ -10,4 +10,22 @@ menu "Example Configuration"
             - A broker on your own network (e.g. Mosquitto running on a PC/Raspberry Pi):
               mqtt://<that device's LAN IP>:1883
 
+    config MPU6050_SDA_GPIO
+        int "MPU6050 I2C SDA GPIO"
+        default 21
+        help
+            GPIO connected to the MPU6050's SDA pin.
+
+    config MPU6050_SCL_GPIO
+        int "MPU6050 I2C SCL GPIO"
+        default 22
+        help
+            GPIO connected to the MPU6050's SCL pin.
+
+    config MPU6050_I2C_FREQ_HZ
+        int "MPU6050 I2C bus frequency (Hz)"
+        default 400000
+        help
+            I2C clock speed used to talk to the MPU6050.
+
 endmenu

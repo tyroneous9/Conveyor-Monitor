@@ -4,12 +4,7 @@
  * What this does:
  *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
  *   2. Connects to a plain (non-TLS) MQTT broker
- *   3. Every few seconds, publishes a simulated sensor reading
- *
- * There is no real sensor wired up yet — read_simulated_temperature() below
- * is a stand-in. Once you have real hardware, replace its body with an
- * actual sensor read (e.g. reading an ADC pin or an I2C sensor) and keep
- * everything else the same.
+ *   3. Every few seconds, reads the MPU6050 accelerometer and publishes it
  */
 
 #include <stdbool.h>
@@ -18,22 +13,23 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "esp_crt_bundle.h"
+#include "mpu6050.h"
 #include "mqtt_client.h"
 #include "protocol_examples_common.h"
 
 static const char *TAG = "conveyor_monitor";
 
-#define SENSOR_TOPIC "conveyor/sensor/temperature"
+#define SENSOR_TOPIC "conveyor/sensor/accel"
 #define PUBLISH_INTERVAL_MS 5000
 
 static esp_mqtt_client_handle_t s_mqtt_client;
 static volatile bool s_mqtt_connected;
+static mpu6050_handle_t s_mpu6050;
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -73,23 +69,19 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(s_mqtt_client);
 }
 
-/* Placeholder for a real sensor read — swap this out once hardware is wired up. */
-static float read_simulated_temperature(void)
-{
-    static float temperature = 22.0f;
-    /* Drift by up to +/-1.0 degree each call so the value visibly changes. */
-    temperature += ((float)(esp_random() % 21) - 10.0f) / 10.0f;
-    return temperature;
-}
-
 static void sensor_publish_task(void *arg)
 {
     (void)arg;
-    char payload[16];
+    char payload[48];
 
     while (1) {
-        if (s_mqtt_connected) {
-            int len = snprintf(payload, sizeof(payload), "%.1f", read_simulated_temperature());
+        mpu6050_measurements_t accel;
+        esp_err_t err = mpu6050_read_accel(s_mpu6050, &accel);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
+        } else if (s_mqtt_connected) {
+            int len = snprintf(payload, sizeof(payload), "%.3f,%.3f,%.3f",
+                                accel.accel_x, accel.accel_y, accel.accel_z);
             esp_mqtt_client_publish(s_mqtt_client, SENSOR_TOPIC, payload, len, /*qos=*/1, /*retain=*/0);
             ESP_LOGI(TAG, "Published %s = %s", SENSOR_TOPIC, payload);
         }
@@ -102,6 +94,14 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    const mpu6050_config_t mpu6050_cfg = {
+        .sda_io_num = CONFIG_MPU6050_SDA_GPIO,
+        .scl_io_num = CONFIG_MPU6050_SCL_GPIO,
+        .i2c_freq_hz = CONFIG_MPU6050_I2C_FREQ_HZ,
+        .accel_fs = MPU6050_ACCEL_FS_4G,
+    };
+    ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &s_mpu6050));
 
     /* Connects to WiFi using the SSID/password configured in
      * `idf.py menuconfig` under "Example Connection Configuration". */
