@@ -1,5 +1,4 @@
 #include "mpu6050.h"
-
 #include <stdlib.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
