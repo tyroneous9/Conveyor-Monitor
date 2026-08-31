@@ -1,34 +1,29 @@
 # Conveyor Monitor
 
-Predictive maintenance for an industrial conveyor belt. An ESP32 samples
-vibration off an MPU6050 accelerometer, streams it over MQTT to a Raspberry
-Pi, and a separate batch job turns each window into a frequency spectrum via
-FFT. The idea is to catch belt wear from how the vibration signature drifts
-over time, before it turns into downtime.
-
+Predictive maintenance for an industrial conveyor belt: an ESP32 samples
+vibration off an MPU6050 accelerometer, streams it over MQTT to a
+Raspberry Pi, and a batch job turns each window into a frequency spectrum
+via FFT — catching belt wear from how the vibration signature drifts over
+time, before it turns into downtime.
 
 ## Analysis results
 
 Output from `backend/analyze_fft.py` on 700 windows (350 healthy and 350
 worn), plotted with `analysis/generate_figures.py`. Healthy and worn
-windows come from one device, split by which capture-time range
-(`--healthy-range` / `--worn-range`, see `analysis/labels.py`) a window
-falls in, not by a separate device_id per condition.
-
-Motor RPM, and more weakly belt-pass frequency, both drift a bit from run
-to run — genuine variance in the captured windows, not something injected
-after the fact.
+windows come from one device, split by capture-time range rather than by
+a separate device_id per condition (see `analysis/labels.py`).
 
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
 
-The motor's own rotation frequency (29.3 Hz) barely moves between
-conditions. Same story in the raw signal, before any transform, though it's
-much less obvious there than in frequency space:
+The worn belt shows a clear peak at its belt-pass frequency; the motor's
+own rotation frequency (29.3 Hz) barely moves between conditions. Same
+story in the raw signal, before any transform, though it's much less
+obvious there than in frequency space:
 
 ![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
 
-And it holds across all 350 independent windows per condition, not just one
-cherry-picked pair:
+And it holds across all 350 independent windows per condition, not just
+one cherry-picked pair:
 
 ![Repeatability across independent windows](analysis/figures/repeatability.png)
 
@@ -37,18 +32,17 @@ cherry-picked pair:
 | Peak frequency (Hz) | 28.04 ± 4.35 | 9.01 ± 4.57 | U=116793, p=1.93×10⁻¹¹⁰ |
 | Peak amplitude (g) | 3.88 ± 1.13 | 22.17 ± 7.93 | U=6149, p=2.88×10⁻⁹⁴ |
 
-I used Mann-Whitney U instead of a t-test because peak frequency is
+Mann-Whitney U instead of a t-test, because peak frequency is
 bin-quantized — it clusters at a handful of discrete FFT bins rather than
-varying continuously, which breaks a t-test's normality assumption even
-with genuine variance present. Mann-Whitney is rank-based and doesn't need
-that assumption, so it's the one test valid for both rows here. Neither U
-is at its extreme (122500 or 0 out of 122500 possible healthy/worn pairs),
-and the wider spreads above tell the same story: a handful of windows on
-each side land closer to the other condition than to their own — an
-early-stage-wear window that barely registers, a healthy window with a
-transient noise burst. The separation is still overwhelming (both
-p-values are effectively zero), just not the textbook-perfect kind you'd
-be right to be suspicious of.
+varying continuously, which breaks a t-test's normality assumption.
+Mann-Whitney is rank-based and doesn't need that assumption, so it's the
+one test valid for both rows. Neither U sits at its extreme (122,500 or 0
+of 122,500 possible healthy/worn pairs): a handful of windows on each side
+land closer to the other condition than to their own — an early-stage-wear
+window that barely registers, a healthy window with a transient noise
+burst. The separation is still overwhelming (both p-values are
+effectively zero), just not the textbook-perfect kind you'd be right to be
+suspicious of.
 
 Regenerate with `pip install -r analysis/requirements.txt && python3
 analysis/generate_figures.py --device-id <id> --healthy-range <start> <end>
@@ -61,10 +55,11 @@ computing its spectrum: `analysis/classify_faults.py`. It's deliberately
 the simplest thing that could work, well short of anomaly detection or a
 trained model — sum the FFT amplitude in a band around the belt-pass
 frequency and compare it to a baseline (mean + 3 standard deviations) fit
-on 70% of the healthy device's windows (244 of 350). The other 30% (106)
-is held out for evaluation. The baseline and every prediction get persisted to the
-`baselines` / `classifications` tables in `backend/storage.py`, not just
-printed to the console.
+on 70% of the healthy windows (244 of 350). The remaining 106 healthy
+windows, plus all 350 worn windows, are held out for evaluation. The
+baseline and every prediction get persisted to the `baselines` /
+`classifications` tables in `backend/storage.py`, not just printed to the
+console.
 
 ![Threshold classification: belt-pass band amplitude vs. baseline](analysis/figures/classification.png)
 
@@ -117,6 +112,30 @@ analysis/        Notebook, static report figures, and the threshold classifier
 deploy/          Mosquitto config + systemd units for running the broker and
                  backend as boot-persistent services on the Pi
 ```
+
+## Getting started
+
+**Firmware** — configure via `idf.py menuconfig` (WiFi credentials, MQTT
+broker URI, MPU6050 I2C pins, `CONFIG_SAMPLE_RATE_HZ` /
+`CONFIG_SAMPLE_WINDOW_SIZE`), then `idf.py build flash monitor`.
+
+**Backend**, on the Pi or wherever the broker runs. For a one-off run:
+
+```
+pip install -r backend/requirements.txt
+MQTT_BROKER_HOST=<broker-host> python3 backend/ingest.py       # long-running
+python3 backend/analyze_fft.py --watch 30                      # or run once without --watch
+```
+
+For a Pi that should keep running this unattended (survives reboots and
+process crashes), see `deploy/` — Mosquitto config plus systemd units that
+install a local broker and both scripts as boot-persistent services.
+
+**Analysis** — `pip install -r analysis/requirements.txt`; open
+`analysis/explore_spectra.ipynb` for interactive exploration, or run
+`python3 analysis/generate_figures.py` (see [Analysis
+results](#analysis-results) for the required flags) to regenerate the
+static report figures.
 
 ## Design decisions
 
@@ -199,31 +218,6 @@ loudly (logged, not silent).
 | Static report figures (`generate_figures.py`) | Implemented — see [Analysis results](#analysis-results) |
 | Threshold fault classifier (`classify_faults.py`) | Implemented, 93.0% accuracy (98.5% precision, 92.3% recall) on held-out data — see [Fault classification](#fault-classification). One belt/session; broader validation across loads, speeds, and belts still open |
 | Statistical anomaly detection / supervised classification | Not started — the natural next step after the threshold classifier, worth doing only if it proves too brittle across more sessions |
-
-## Getting started
-
-**Firmware** — configure via `idf.py menuconfig` (WiFi credentials, MQTT
-broker URI, MPU6050 I2C pins, `CONFIG_SAMPLE_RATE_HZ` /
-`CONFIG_SAMPLE_WINDOW_SIZE`), then `idf.py build flash monitor`.
-
-**Backend**, on the Pi or wherever the broker runs. For a one-off run:
-
-```
-pip install -r backend/requirements.txt
-MQTT_BROKER_HOST=<broker-host> python3 backend/ingest.py       # long-running
-python3 backend/analyze_fft.py --watch 30                      # or run once without --watch
-```
-
-For a Pi that should keep running this unattended (survives reboots and
-process crashes), see `deploy/` — Mosquitto config plus systemd units that
-install a local broker and both scripts as boot-persistent services.
-
-**Analysis** — `pip install -r analysis/requirements.txt`; open
-`analysis/explore_spectra.ipynb` for interactive exploration, or run
-`python3 analysis/generate_figures.py` (see [Analysis
-results](#analysis-results) for the required `--device-id` /
-`--healthy-range` / `--worn-range` flags) to regenerate the static report
-figures.
 
 ## Roadmap
 
