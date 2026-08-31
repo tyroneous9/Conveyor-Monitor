@@ -2,15 +2,13 @@
 
 Predictive maintenance for an industrial conveyor belt: an ESP32 samples
 vibration off an MPU6050 accelerometer, streams it over MQTT to a
-Raspberry Pi, and a batch job turns each window into a frequency spectrum
-via FFT — catching belt wear from how the vibration signature drifts over
-time, before it turns into downtime.
+Raspberry Pi, and analyzes this data using FFT to predict belt wear.
 
 ## Analysis results
 
-Output from `backend/analyze_fft.py` on 700 windows (350 healthy and 350
+Output from `backend/analyze_fft.py` on 700 captures (350 healthy and 350
 worn), plotted with `analysis/generate_figures.py`. Healthy and worn
-windows come from one device, split by capture-time range rather than by
+captures come from one device, split by capture-time range rather than by
 a separate device_id per condition (see `analysis/labels.py`).
 
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
@@ -22,10 +20,10 @@ obvious there than in frequency space:
 
 ![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
 
-And it holds across all 350 independent windows per condition, not just
+And it holds across all 350 independent captures per condition, not just
 one cherry-picked pair:
 
-![Repeatability across independent windows](analysis/figures/repeatability.png)
+![Repeatability across independent captures](analysis/figures/repeatability.png)
 
 | Metric | Healthy (n=350) | Worn (n=350) | Mann-Whitney U |
 |---|---|---|---|
@@ -37,9 +35,9 @@ bin-quantized — it clusters at a handful of discrete FFT bins rather than
 varying continuously, which breaks a t-test's normality assumption.
 Mann-Whitney is rank-based and doesn't need that assumption, so it's the
 one test valid for both rows. Neither U sits at its extreme (122,500 or 0
-of 122,500 possible healthy/worn pairs): a handful of windows on each side
+of 122,500 possible healthy/worn pairs): a handful of captures on each side
 land closer to the other condition than to their own — an early-stage-wear
-window that barely registers, a healthy window with a transient noise
+capture that barely registers, a healthy capture with a transient noise
 burst. The separation is still overwhelming (both p-values are
 effectively zero), just not the textbook-perfect kind you'd be right to be
 suspicious of.
@@ -50,13 +48,13 @@ analysis/generate_figures.py --device-id <id> --healthy-range <start> <end>
 
 ## Fault classification
 
-A first pass at actually calling a window healthy or worn, not just
+A first pass at actually calling a capture healthy or worn, not just
 computing its spectrum: `analysis/classify_faults.py`. It's deliberately
 the simplest thing that could work, well short of anomaly detection or a
 trained model — sum the FFT amplitude in a band around the belt-pass
 frequency and compare it to a baseline (mean + 3 standard deviations) fit
-on 70% of the healthy windows (244 of 350). The remaining 106 healthy
-windows, plus all 350 worn windows, are held out for evaluation. The
+on 70% of the healthy captures (244 of 350). The remaining 106 healthy
+captures, plus all 350 worn captures, are held out for evaluation. The
 baseline and every prediction get persisted to the `baselines` /
 `classifications` tables in `backend/storage.py`, not just printed to the
 console.
@@ -68,8 +66,8 @@ console.
 | **True healthy** | 101 | 5 |
 | **True worn** | 27 | 323 |
 
-93.0% accuracy on the 456 windows never used to set the threshold (98.5%
-precision, 92.3% recall) — a handful of false alarms on healthy windows,
+93.0% accuracy on the 456 captures never used to set the threshold (98.5%
+precision, 92.3% recall) — a handful of false alarms on healthy captures,
 and it misses about 8% of worn ones, mostly the early-stage-wear cases
 whose belt-pass amplitude hasn't climbed far enough above baseline yet to
 clear a threshold set from healthy data alone. That's a reasonable failure
@@ -87,11 +85,11 @@ Regenerate with `python3 analysis/classify_faults.py --device-id <id>
 
 ```mermaid
 flowchart LR
-    MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware<br/>esp_timer @ 500Hz<br/>double-buffered windows"]
-    ESP -->|"MQTT, QoS 1<br/>JSON window"| Broker[["MQTT broker"]]
+    MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware<br/>esp_timer @ 500Hz<br/>double-buffered captures"]
+    ESP -->|"MQTT, QoS 1<br/>JSON capture"| Broker[["MQTT broker"]]
     Broker --> Ingest["ingest.py"]
     Ingest -->|raw_windows| DB[("SQLite")]
-    DB -->|unanalyzed windows| Analyze["analyze_fft.py"]
+    DB -->|unanalyzed captures| Analyze["analyze_fft.py"]
     Analyze -->|fft_results| DB
     DB --> NB["analysis/*.ipynb"]
     DB -->|fft_results| Classify["classify_faults.py"]
@@ -105,7 +103,7 @@ below.
 ## Repo layout
 
 ```
-main/            ESP-IDF firmware: fixed-rate sampling, windowing, MQTT publish
+main/            ESP-IDF firmware: fixed-rate sampling, capture buffering, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        Notebook, static report figures, and the threshold classifier
@@ -148,19 +146,19 @@ board's FreeRTOS tick runs at 100Hz (10ms resolution), which rounds a
 500Hz/2ms sample period down to zero ticks and samples uncontrolled.
 So the firmware uses `esp_timer` instead — hardware-backed, independent of
 the FreeRTOS tick — to fire a minimal read-and-store callback at a fixed
-rate, alternating between two window buffers. JSON serialization and the
+rate, alternating between two capture buffers. JSON serialization and the
 network publish run in a separate task, so a stalled MQTT publish never
 delays the next sample.
 
 **Ingestion and analysis run as separate processes.** `ingest.py` does one
-thing: validate an incoming window and write it to SQLite. `analyze_fft.py`
+thing: validate an incoming capture and write it to SQLite. `analyze_fft.py`
 has no MQTT client at all — it's a standalone script that polls the
-database for windows without a matching result, computes the spectrum, and
+database for captures without a matching result, computes the spectrum, and
 writes it back. A failure in one never blocks the other, and re-running
-analysis is safe because it skips windows it's already processed, not
+analysis is safe because it skips captures it's already processed, not
 because you have to remember to be careful with it.
 
-**SQLite over Postgres.** One writer at a time, one row per window, no
+**SQLite over Postgres.** One writer at a time, one row per capture, no
 daemon competing with the MQTT broker for a Raspberry Pi's limited
 resources. WAL mode is on so notebooks can read the file while a writer is
 still appending. Two tables — `raw_windows` and `fft_results`, linked by
@@ -193,23 +191,23 @@ same hotspot network (see `deploy/`) keeps traffic off the carrier's WAN
 entirely, which sidesteps both problems without touching router config I
 don't control.
 
-**A network drop queues instead of dropping the window.** QoS 1 alone only
+**A network drop queues instead of dropping the capture.** QoS 1 alone only
 guarantees delivery of messages the client actually attempts to send; it
 doesn't help if the firmware refuses to publish at all while disconnected,
 which is what it used to do. Now `esp_mqtt_client_publish` is called
-unconditionally, and the client's own outbox — capped at 8 windows' worth
+unconditionally, and the client's own outbox — capped at 8 captures' worth
 of JSON, so a stuck connection can't grow it unbounded on a
 memory-constrained device — holds anything sent while offline and flushes
 it once auto-reconnect (2s retry, down from the 10s default) brings the
 link back. A hotspot blip now costs a delay, not silently lost data; only
-an outage longer than the outbox can hold still drops windows, and does so
+an outage longer than the outbox can hold still drops captures, and does so
 loudly (logged, not silent).
 
 ## Status
 
 | Component | State |
 |---|---|
-| Firmware: fixed-rate windowed sampling, JSON publish | Implemented, code-reviewed |
+| Firmware: fixed-rate sampling into fixed-length captures, JSON publish | Implemented, code-reviewed |
 | MQTT transport: topics, QoS, persistent session, bounded offline outbox, fast reconnect | Implemented |
 | Ingestion (`ingest.py`) | Implemented |
 | FFT analysis (`analyze_fft.py`) | Implemented, verified end-to-end, including idempotency on re-run |
