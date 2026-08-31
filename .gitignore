@@ -1,6 +1,7 @@
 build/
 .vscode/
 sdkconfig
+dependencies.lock
 backend/*.sqlite3*
 __pycache__/
 *.pyc
