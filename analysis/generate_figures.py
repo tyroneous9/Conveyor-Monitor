@@ -147,17 +147,20 @@ def plot_repeatability(h_freq, h_amp, w_freq, w_amp, out_path):
 
 
 def describe_test(healthy, worn, decimals):
-    """Welch's t-test, or a plain statement when a column has ~zero variance
-    in both groups (peak frequency is quantized to an FFT bin -- with this
-    little jitter every window in a session can land on the same bin, and a
-    t-test on zero-variance data is undefined, not just uninteresting)."""
+    """Mann-Whitney U, not a t-test: a t-test estimates the difference in
+    means relative to within-group variance, which is undefined when that
+    variance is zero -- exactly what happens here, since peak frequency is
+    quantized to an FFT bin and this dataset's jitter isn't enough to move
+    any window to a different bin (scipy.stats.ttest_ind degenerates to
+    t=inf with a precision-loss warning on this data -- confirmed, not
+    hypothetical). Mann-Whitney is rank-based, needs no variance assumption,
+    and is valid for both the degenerate (frequency) and continuous
+    (amplitude) case alike, so both rows use the same, correct test."""
     fmt = "{:." + str(decimals) + "f}"
     healthy_str = f"{fmt.format(healthy.mean())} ± {fmt.format(healthy.std())}"
     worn_str = f"{fmt.format(worn.mean())} ± {fmt.format(worn.std())}"
-    if healthy.std() < 1e-9 and worn.std() < 1e-9:
-        return healthy_str, worn_str, "identical every window (0 variance) -- t-test undefined"
-    t, p = stats.ttest_ind(healthy, worn, equal_var=False)
-    return healthy_str, worn_str, f"t={t:.1f}, p={p:.2e}"
+    u, p = stats.mannwhitneyu(healthy, worn, alternative="two-sided")
+    return healthy_str, worn_str, f"U={u:.0f}, p={p:.2e}"
 
 
 def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
@@ -165,7 +168,7 @@ def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
     amp_row = describe_test(h_amp, w_amp, decimals=2)
 
     lines = [
-        "| Metric | Healthy (n={}) | Worn (n={}) | Welch's t-test |".format(len(h_freq), len(w_freq)),
+        "| Metric | Healthy (n={}) | Worn (n={}) | Mann-Whitney U |".format(len(h_freq), len(w_freq)),
         "|---|---|---|---|",
         "| Peak frequency (Hz) | {} | {} | {} |".format(*freq_row),
         "| Peak amplitude (g) | {} | {} | {} |".format(*amp_row),

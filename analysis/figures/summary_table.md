@@ -1,4 +1,4 @@
-| Metric | Healthy (n=20) | Worn (n=20) | Welch's t-test |
+| Metric | Healthy (n=100) | Worn (n=100) | Mann-Whitney U |
 |---|---|---|---|
-| Peak frequency (Hz) | 29.30 ± 0.00 | 7.81 ± 0.00 | identical every window (0 variance) -- t-test undefined |
-| Peak amplitude (g) | 3.12 ± 0.22 | 21.93 ± 1.41 | t=-57.4, p=1.43e-23 |
+| Peak frequency (Hz) | 29.34 ± 1.17 | 8.12 ± 0.72 | U=10000, p=2.67e-38 |
+| Peak amplitude (g) | 3.01 ± 0.25 | 21.03 ± 1.62 | U=0, p=2.56e-34 |

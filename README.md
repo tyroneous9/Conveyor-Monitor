@@ -10,10 +10,14 @@ capture and fault classification are the next phase (see [Status](#status)).
 
 ## Analysis results
 
-Real output from `backend/analyze_fft.py` on 40 windows (20 healthy, 20 worn
-— synthetic test data, see [Status](#status)), plotted with
+Real output from `backend/analyze_fft.py` on 200 windows (100 healthy, 100
+worn — synthetic test data, see [Status](#status)), plotted with
 `analysis/generate_figures.py` (matplotlib + scipy, static PNGs, no
-interactivity or external hosting involved).
+interactivity or external hosting involved). Frequency jitter between
+windows is sized to occasionally cross an FFT bin boundary (motor RPM and,
+more weakly, belt-pass frequency both drift run to run on a real machine —
+see `backend/seed_sample_data.py`), so peak frequency isn't a frozen
+constant here the way an earlier, less realistic pass had it.
 
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
 
@@ -24,20 +28,26 @@ far less obvious by eye than in frequency space:
 
 ![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
 
-Across all 20 independent windows per condition, not just one cherry-picked
+Across all 100 independent windows per condition, not just one cherry-picked
 window:
 
 ![Repeatability across independent windows](analysis/figures/repeatability.png)
 
-| Metric | Healthy (n=20) | Worn (n=20) | Welch's t-test |
+| Metric | Healthy (n=100) | Worn (n=100) | Mann-Whitney U |
 |---|---|---|---|
-| Peak frequency (Hz) | 29.30 ± 0.00 | 7.81 ± 0.00 | identical every window (0 variance) — t-test undefined |
-| Peak amplitude (g) | 3.12 ± 0.22 | 21.93 ± 1.41 | t=-57.4, p=1.43e-23 |
+| Peak frequency (Hz) | 29.34 ± 1.17 | 8.12 ± 0.72 | U=10000, p=2.67×10⁻³⁸ |
+| Peak amplitude (g) | 3.01 ± 0.25 | 21.03 ± 1.62 | U=0, p=2.56×10⁻³⁴ |
 
-Peak frequency is quantized to an FFT bin, so with this little jitter every
-window in a session lands on the same bin — reported as-is rather than
-forcing a significance test onto zero-variance data. Peak amplitude is
-continuous and the separation is real: p ≈ 1.4×10⁻²³.
+Mann-Whitney U, not a t-test: peak frequency is bin-quantized (clustered at
+a handful of discrete FFT bins, not continuous), which violates a t-test's
+approximate-normality assumption even with real variance present — and an
+earlier pass had exactly zero variance in both groups from under-sized
+jitter, which is flatly undefined for a t-test (`scipy.stats.ttest_ind`
+degenerated to `t=inf` with a precision-loss warning; see `TODO.md`).
+Mann-Whitney is rank-based and needs neither assumption, so the same test
+applies validly to both rows. U=10000 and U=0 both mean *complete*
+separation — every one of the 100 healthy windows' values beat every one of
+the 100 worn windows', in each metric's respective direction.
 
 Regenerate with `pip install -r analysis/requirements.txt && python3
 analysis/generate_figures.py`.

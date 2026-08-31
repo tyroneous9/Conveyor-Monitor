@@ -142,6 +142,17 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       settling on the motor fundamental — fixed by making healthy's
       belt-pass amplitude clearly subordinate, as a real healthy belt's
       would be.)
+- [x] Frequency jitter widened (motor 2%→5%, belt 2%→12%) and dataset scaled
+      from 20 to 100 windows per condition (200 total). The old 2% jitter
+      never moved either frequency far enough to cross an FFT bin boundary
+      (1.95 Hz wide at 500Hz/256-sample defaults) — every window landed on
+      the exact same bin, which is what produced the zero-variance data that
+      broke the significance test below. Checked the actual bin-crossing
+      math before picking new values (motor's true frequency sits close to
+      a bin center, needs less jitter to cross; belt's sits more off-center,
+      needs more) rather than guessing. Confirmed post-fix: healthy peak
+      freq now 29.34±1.17Hz (was 29.30±0.00), worn 8.12±0.72Hz (was
+      7.81±0.00) — real variance, condition separation still clean.
 
 ## Signal processing / inference (deferred — separate from the backend above)
 
@@ -167,10 +178,19 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       frequency is quantized to an FFT bin, and with this dataset's small
       per-window jitter every window in a session lands on the *same* bin —
       zero variance in both groups, so `scipy.stats.ttest_ind` degenerates to
-      `t=inf` with a precision-loss warning. Fixed by detecting the
-      zero-variance case and reporting it as a plain fact instead of forcing
-      a t-test onto it; peak amplitude (continuous, real variance) gets the
-      real Welch's t-test: t=-57.4, p=1.4×10⁻²³.
+      `t=inf` with a precision-loss warning — a t-test is the wrong tool
+      here, not just an inconvenient result on this data. First pass worked
+      around it (detect zero variance, skip the test, report a plain
+      sentence); real fix is `scipy.stats.mannwhitneyu` instead of a t-test
+      for both rows — rank-based, no variance assumption, valid for the
+      degenerate (frequency) and continuous (amplitude) case alike. Numbers
+      below are from the 20-per-condition run this was first built and
+      diagnosed against; after the jitter/scale-up fix above (100 per
+      condition, real variance in both metrics), Mann-Whitney remains the
+      right choice regardless — peak frequency is still bin-quantized
+      (discrete, non-normal), just no longer literally zero-variance — and
+      still finds complete separation: peak frequency U=10000, p=2.67×10⁻³⁸;
+      peak amplitude U=0, p=2.56×10⁻³⁴ (current numbers, in README.md).
 - [ ] Feature extraction, baseline capture, and threshold/anomaly detection
       go in this same notebook once there's real hardware data to develop
       them against.

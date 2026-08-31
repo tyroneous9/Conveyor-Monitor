@@ -53,8 +53,14 @@ def sine_sum(t, harmonics, phase=0.0):
 def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, belt_freq_hz):
     t = np.arange(window_size) / sample_rate_hz
 
-    motor_freq = jitter(rng, motor_freq_hz, spread=0.02)
-    belt_freq = jitter(rng, belt_freq_hz, spread=0.02)
+    # Wide enough to occasionally cross an FFT bin boundary (1.95 Hz at
+    # 500Hz/256-sample defaults), not just wobble within one -- a real
+    # motor's RPM (and, more weakly, a belt's pass frequency) actually
+    # varies run to run. Too-small jitter here previously made peak
+    # frequency bit-identical across every window (zero variance), which
+    # broke a t-test in analysis/generate_figures.py -- see TODO.md.
+    motor_freq = jitter(rng, motor_freq_hz, spread=0.05)
+    belt_freq = jitter(rng, belt_freq_hz, spread=0.12)
 
     motor_amp = jitter(rng, 0.05)
     motor_2h_amp = jitter(rng, 0.01)
