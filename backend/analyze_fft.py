@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Batch FFT analysis: reads raw accel windows from SQLite, computes spectra.
+"""Batch FFT analysis: reads raw accel captures from SQLite, computes spectra.
 
 Deliberately separate from ingestion (ingest.py) -- this script never
-touches MQTT. It reads windows that don't have a matching fft_results row
-yet (storage.fetch_unanalyzed_windows), computes a spectrum per axis
+touches MQTT. It reads captures that don't have a matching fft_results row
+yet (storage.fetch_unanalyzed_captures), computes a spectrum per axis
 (mean-subtract, Hann window, rfft -- README §4), and writes each result to
 the fft_results table.
 
 Run it whenever you want to catch up on analysis -- after a capture
 session, by hand, or continuously with --watch. It's idempotent:
-already-analyzed windows are skipped, so re-running (or overlapping runs)
+already-analyzed captures are skipped, so re-running (or overlapping runs)
 is always safe.
 
 Usage:
@@ -47,13 +47,13 @@ def compute_spectrum(sample_rate_hz, samples):
     return freq_hz, spectrum
 
 
-def analyze_window(window):
-    sample_rate_hz = window["sample_rate_hz"]
+def analyze_capture(capture):
+    sample_rate_hz = capture["sample_rate_hz"]
     result = {"sample_rate_hz": sample_rate_hz}
     freq_hz = None
     peak = None  # (axis, freq_hz, amplitude)
     for axis in AXES:
-        samples = np.asarray(window[axis], dtype=np.float64)
+        samples = np.asarray(capture[axis], dtype=np.float64)
         freq_hz, spectrum = compute_spectrum(sample_rate_hz, samples)
         result[f"fft_{axis}"] = spectrum.tolist()
         peak_idx = int(np.argmax(spectrum[1:])) + 1  # skip the DC bin
@@ -64,26 +64,26 @@ def analyze_window(window):
 
 
 def run_once(conn, limit):
-    windows = storage.fetch_unanalyzed_windows(conn, limit=limit)
-    log.info("found %d unanalyzed window(s) in %s", len(windows), DB_PATH)
+    captures = storage.fetch_unanalyzed_captures(conn, limit=limit)
+    log.info("found %d unanalyzed capture(s) in %s", len(captures), DB_PATH)
 
-    for window in windows:
-        result, peak = analyze_window(window)
-        storage.store_fft_result(conn, window["window_id"], window["device_id"], result, peak)
+    for capture in captures:
+        result, peak = analyze_capture(capture)
+        storage.store_fft_result(conn, capture["capture_id"], capture["device_id"], result, peak)
         log.info(
-            "window_id=%d device=%s peak=%.1fHz (%s) amp=%.3f",
-            window["window_id"], window["device_id"], peak[1], peak[0], peak[2],
+            "capture_id=%d device=%s peak=%.1fHz (%s) amp=%.3f",
+            capture["capture_id"], capture["device_id"], peak[1], peak[0], peak[2],
         )
 
-    return len(windows)
+    return len(captures)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=100, help="max windows to process per run")
+    parser.add_argument("--limit", type=int, default=100, help="max captures to process per run")
     parser.add_argument(
         "--watch", type=float, default=None, metavar="SECONDS",
-        help="keep running, checking for new windows every SECONDS instead of exiting after one pass",
+        help="keep running, checking for new captures every SECONDS instead of exiting after one pass",
     )
     args = parser.parse_args()
 

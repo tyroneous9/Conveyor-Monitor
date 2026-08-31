@@ -38,19 +38,19 @@ menu "Example Configuration"
         int "Accelerometer sample rate (Hz)"
         default 500
         help
-            Fixed sample rate for the vibration window buffer, driven by a
+            Fixed sample rate for the vibration capture buffer, driven by a
             hardware-backed esp_timer (not the FreeRTOS tick, which at
             CONFIG_FREERTOS_HZ=100 is too coarse for rates like this).
             Should eventually be picked against Nyquist once target
             mechanical frequencies (motor RPM, belt-pass frequency) are
             known -- see TODO.md.
 
-    config SAMPLE_WINDOW_SIZE
-        int "Samples per published window"
+    config SAMPLE_CAPTURE_SIZE
+        int "Samples per published capture"
         default 256
         help
             Number of samples buffered per axis before publishing one MQTT
-            window as JSON. A power of two is recommended (not required) --
+            capture as JSON. A power of two is recommended (not required) --
             most FFT implementations are radix-2 and prefer it.
 
 endmenu

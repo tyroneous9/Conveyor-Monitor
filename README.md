@@ -88,7 +88,7 @@ flowchart LR
     MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware<br/>esp_timer @ 500Hz<br/>double-buffered captures"]
     ESP -->|"MQTT, QoS 1<br/>JSON capture"| Broker[["MQTT broker"]]
     Broker --> Ingest["ingest.py"]
-    Ingest -->|raw_windows| DB[("SQLite")]
+    Ingest -->|raw_captures| DB[("SQLite")]
     DB -->|unanalyzed captures| Analyze["analyze_fft.py"]
     Analyze -->|fft_results| DB
     DB --> NB["analysis/*.ipynb"]
@@ -115,7 +115,7 @@ deploy/          Mosquitto config + systemd units for running the broker and
 
 **Firmware** — configure via `idf.py menuconfig` (WiFi credentials, MQTT
 broker URI, MPU6050 I2C pins, `CONFIG_SAMPLE_RATE_HZ` /
-`CONFIG_SAMPLE_WINDOW_SIZE`), then `idf.py build flash monitor`.
+`CONFIG_SAMPLE_CAPTURE_SIZE`), then `idf.py build flash monitor`.
 
 **Backend**, on the Pi or wherever the broker runs. For a one-off run:
 
@@ -161,8 +161,8 @@ because you have to remember to be careful with it.
 **SQLite over Postgres.** One writer at a time, one row per capture, no
 daemon competing with the MQTT broker for a Raspberry Pi's limited
 resources. WAL mode is on so notebooks can read the file while a writer is
-still appending. Two tables — `raw_windows` and `fft_results`, linked by
-`window_id` — keep raw data and derived spectra separate, so neither ever
+still appending. Two tables — `raw_captures` and `fft_results`, linked by
+`capture_id` — keep raw data and derived spectra separate, so neither ever
 overwrites the other.
 
 **QoS and session state are matched end to end.** MQTT's effective delivery

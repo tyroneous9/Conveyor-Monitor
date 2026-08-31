@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Threshold-based fault classifier: does a window's spectrum look like the
+"""Threshold-based fault classifier: does a capture's spectrum look like the
 healthy baseline, or does it look worn?
 
 Deliberately the *simplest* thing in README §4's own staged progression --
@@ -17,7 +17,7 @@ brittle.
 
 Ground truth comes from operator-recorded capture sessions, not device_id:
 one physical device (--device-id) gets moved between a known-healthy and a
-known-worn belt on different runs, and a window is labeled by which
+known-worn belt on different runs, and a capture is labeled by which
 --healthy-range / --worn-range its capture timestamp falls in.
 
 Baseline/classification results are stored in the `baselines` and
@@ -25,10 +25,10 @@ Baseline/classification results are stored in the `baselines` and
 artifacts, not numbers recomputed silently inside this script every run.
 
 Methodology note: the baseline is fit on a held-out fraction of the
-healthy range's windows (--baseline-fraction, default 0.7, taken in
+healthy range's captures (--baseline-fraction, default 0.7, taken in
 capture order) and evaluated against the *remaining* healthy fraction plus
-every worn-range window -- evaluating "does healthy data fall under
-threshold" on the same windows used to set that threshold would be
+every worn-range capture -- evaluating "does healthy data fall under
+threshold" on the same captures used to set that threshold would be
 circular for the healthy class.
 
 Usage:
@@ -73,31 +73,31 @@ def band_amplitude(freq_hz, fft_amp, center_hz, width_hz):
     """Sum of linear FFT magnitude within [center-width/2, center+width/2]
     -- a band, not a single bin, because motor/belt speed drifts run to
     run (see README) and can shift the true peak to an adjacent bin
-    between windows; a single-bin lookup would miss it."""
+    between captures; a single-bin lookup would miss it."""
     lo, hi = center_hz - width_hz / 2, center_hz + width_hz / 2
     return sum(a for f, a in zip(freq_hz, fft_amp) if lo <= f <= hi)
 
 
-def compute_baseline(healthy_windows, band_center_hz, band_width_hz, baseline_fraction):
-    n_fit = max(1, int(len(healthy_windows) * baseline_fraction))
-    fit_windows, holdout_windows = healthy_windows[:n_fit], healthy_windows[n_fit:]
+def compute_baseline(healthy_captures, band_center_hz, band_width_hz, baseline_fraction):
+    n_fit = max(1, int(len(healthy_captures) * baseline_fraction))
+    fit_captures, holdout_captures = healthy_captures[:n_fit], healthy_captures[n_fit:]
 
-    values = np.array([band_amplitude(w["freq_hz"], w["fft_ay"], band_center_hz, band_width_hz) for w in fit_windows])
+    values = np.array([band_amplitude(c["freq_hz"], c["fft_ay"], band_center_hz, band_width_hz) for c in fit_captures])
     mean, std = float(values.mean()), float(values.std())
     log.info(
-        "baseline: %s = %.3f ± %.3f (n=%d fit windows, %d held out)",
-        FEATURE_NAME, mean, std, len(fit_windows), len(holdout_windows),
+        "baseline: %s = %.3f ± %.3f (n=%d fit captures, %d held out)",
+        FEATURE_NAME, mean, std, len(fit_captures), len(holdout_captures),
     )
-    return mean, std, fit_windows, holdout_windows
+    return mean, std, fit_captures, holdout_captures
 
 
-def classify_windows(conn, windows, device_id, threshold, band_center_hz, band_width_hz):
+def classify_captures(conn, captures, device_id, threshold, band_center_hz, band_width_hz):
     results = []
-    for w in windows:
-        value = band_amplitude(w["freq_hz"], w["fft_ay"], band_center_hz, band_width_hz)
+    for c in captures:
+        value = band_amplitude(c["freq_hz"], c["fft_ay"], band_center_hz, band_width_hz)
         predicted = "worn" if value > threshold else "healthy"
-        storage.store_classification(conn, w["window_id"], device_id, value, threshold, predicted)
-        results.append({"window_id": w["window_id"], "value": value, "predicted": predicted})
+        storage.store_classification(conn, c["capture_id"], device_id, value, threshold, predicted)
+        results.append({"capture_id": c["capture_id"], "value": value, "predicted": predicted})
     return results
 
 
@@ -152,7 +152,7 @@ def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
             if not pts:
                 continue
             ax.scatter(
-                [r["window_id"] for r in pts], [r["value"] for r in pts],
+                [r["capture_id"] for r in pts], [r["value"] for r in pts],
                 color=color, marker=markers[role], s=32,
                 facecolors=color if role != "held-out" else "none",
                 edgecolors=color,
@@ -164,7 +164,7 @@ def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
                 xytext=(4, 4), textcoords="offset points", fontsize=9)
     ax.axhspan(baseline_mean - baseline_std, baseline_mean + baseline_std, color=HEALTHY_COLOR, alpha=0.08)
 
-    ax.set_xlabel("window id")
+    ax.set_xlabel("capture id")
     ax.set_ylabel(f"{FEATURE_NAME} (g)")
     ax.set_title("Threshold classification: belt-pass band amplitude vs. baseline")
     ax.legend(frameon=False, loc="upper left", fontsize=8, ncol=2)
@@ -184,7 +184,7 @@ def main():
                          help="wide enough to cover the jittered peak landing in an adjacent FFT bin")
     parser.add_argument("--n-std", type=float, default=3.0, help="threshold = baseline mean + n_std * baseline std")
     parser.add_argument("--baseline-fraction", type=float, default=0.7,
-                         help="fraction of the healthy range's windows (in capture order) used to fit the baseline; rest are held out for evaluation")
+                         help="fraction of the healthy range's captures (in capture order) used to fit the baseline; rest are held out for evaluation")
     args = parser.parse_args()
 
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -198,40 +198,40 @@ def main():
     if not worn_ranges:
         raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
 
-    all_windows = storage.fetch_fft_results(conn, device_id)
-    for w in all_windows:
-        w["label"] = labels.label_for(w["received_at"], healthy_ranges, worn_ranges)
-    healthy_windows = [w for w in all_windows if w["label"] == "healthy"]
-    worn_windows = [w for w in all_windows if w["label"] == "worn"]
-    if not healthy_windows:
-        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --healthy-range")
-    if not worn_windows:
-        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --worn-range")
+    all_captures = storage.fetch_fft_results(conn, device_id)
+    for c in all_captures:
+        c["label"] = labels.label_for(c["received_at"], healthy_ranges, worn_ranges)
+    healthy_captures = [c for c in all_captures if c["label"] == "healthy"]
+    worn_captures = [c for c in all_captures if c["label"] == "worn"]
+    if not healthy_captures:
+        raise SystemExit(f"no captures from device_id={device_id!r} fall inside --healthy-range")
+    if not worn_captures:
+        raise SystemExit(f"no captures from device_id={device_id!r} fall inside --worn-range")
 
-    mean, std, fit_windows, holdout_windows = compute_baseline(
-        healthy_windows, args.band_center_hz, args.band_width_hz, args.baseline_fraction
+    mean, std, fit_captures, holdout_captures = compute_baseline(
+        healthy_captures, args.band_center_hz, args.band_width_hz, args.baseline_fraction
     )
     threshold = mean + args.n_std * std
-    storage.store_baseline(conn, device_id, FEATURE_NAME, mean, std, len(fit_windows))
+    storage.store_baseline(conn, device_id, FEATURE_NAME, mean, std, len(fit_captures))
 
     rows = []
-    for w in fit_windows:
-        value = band_amplitude(w["freq_hz"], w["fft_ay"], args.band_center_hz, args.band_width_hz)
-        rows.append({"window_id": w["window_id"], "value": value, "true": "healthy",
+    for c in fit_captures:
+        value = band_amplitude(c["freq_hz"], c["fft_ay"], args.band_center_hz, args.band_width_hz)
+        rows.append({"capture_id": c["capture_id"], "value": value, "true": "healthy",
                       "predicted": "worn" if value > threshold else "healthy", "role": "baseline-fit"})
 
-    for windows, true, role in (
-        (holdout_windows, "healthy", "held-out"),
-        (worn_windows, "worn", "evaluated"),
+    for captures, true, role in (
+        (holdout_captures, "healthy", "held-out"),
+        (worn_captures, "worn", "evaluated"),
     ):
-        classified = classify_windows(conn, windows, device_id, threshold, args.band_center_hz, args.band_width_hz)
+        classified = classify_captures(conn, captures, device_id, threshold, args.band_center_hz, args.band_width_hz)
         for c in classified:
             rows.append({**c, "true": true, "role": role})
-        log.info("classified %d window(s) (%s)", len(classified), role)
+        log.info("classified %d capture(s) (%s)", len(classified), role)
 
-    # Excludes role=="baseline-fit": those windows set the threshold, so
+    # Excludes role=="baseline-fit": those captures set the threshold, so
     # evaluating them against that same threshold is circular, not a real
-    # test (fit windows still appear in the plot, for context, via `rows`).
+    # test (fit captures still appear in the plot, for context, via `rows`).
     labeled_rows = [r for r in rows if r["role"] != "baseline-fit"]
     report_lines, (accuracy, precision, recall) = write_report(
         labeled_rows, threshold, mean, std, args.n_std, device_id, healthy_ranges, worn_ranges,

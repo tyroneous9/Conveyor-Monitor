@@ -1,10 +1,10 @@
-"""Turns operator-recorded capture sessions into per-window healthy/worn
+"""Turns operator-recorded capture sessions into per-capture healthy/worn
 labels, shared by classify_faults.py and generate_figures.py.
 
 One physical device gets moved between a known-healthy and a known-worn
 belt on different runs -- device_id (the ESP32's MAC address) carries no
 information about belt condition, so ground truth comes from which
-recorded time range a window's capture timestamp falls in instead.
+recorded time range a capture's capture timestamp falls in instead.
 """
 
 from datetime import datetime

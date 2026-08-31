@@ -11,7 +11,7 @@ WorkingDirectory=/home/pi/Conveyor-Monitor/backend
 # Placeholder: point this at the venv where `pip install -r
 # backend/requirements.txt` was run.
 ExecStart=/home/pi/Conveyor-Monitor/backend/venv/bin/python3 analyze_fft.py --watch 30
-# analyze_fft.py is idempotent (skips already-analyzed windows), so
+# analyze_fft.py is idempotent (skips already-analyzed captures), so
 # restarting after a crash is always safe -- no risk of double-processing.
 Restart=on-failure
 RestartSec=5
