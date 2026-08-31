@@ -5,3 +5,4 @@ backend/*.sqlite3*
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+seed_samples.py
