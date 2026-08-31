@@ -5,8 +5,9 @@ off an MPU6050 accelerometer, streams it over MQTT to a
 Raspberry Pi, and a decoupled batch job turns each window into a frequency
 spectrum via FFT. The eventual goal is catching belt wear from how the
 vibration signature drifts over time, before it causes downtime — this repo
-covers the sensing → transport → storage → spectrum pipeline; baseline
-capture and fault classification are the next phase (see [Status](#status)).
+covers the sensing → transport → storage → spectrum pipeline, plus a first
+threshold-based classifier (below) that's only ever seen synthetic data;
+validating it against a real belt is the next phase (see [Status](#status)).
 
 ## Analysis results
 
@@ -52,6 +53,37 @@ the 100 worn windows', in each metric's respective direction.
 Regenerate with `pip install -r analysis/requirements.txt && python3
 analysis/generate_figures.py`.
 
+## Fault classification
+
+A first pass at actually calling a window healthy or worn, not just
+computing its spectrum — `analysis/classify_faults.py`. Deliberately the
+simplest option in README §4's own staged progression (threshold on one
+feature, before reaching for anomaly detection or a trained model): sum the
+FFT amplitude in a band around the belt-pass frequency, compare it to a
+baseline (mean + 3 standard deviations) fit on 70% of the healthy device's
+windows, held out the other 30% for evaluation. Baseline and every
+prediction are persisted (`baselines` / `classifications` tables in
+`backend/storage.py`), not just printed.
+
+![Threshold classification: belt-pass band amplitude vs. baseline](analysis/figures/classification.png)
+
+| | Predicted healthy | Predicted worn |
+|---|---|---|
+| **True healthy** | 30 | 0 |
+| **True worn** | 0 | 100 |
+
+Accuracy 100%, on the 130 windows never used to set the threshold (30
+held-out healthy + 100 worn) — but read that number for what it is, not
+more: **evaluated only against the same hand-picked synthetic model used
+everywhere else on this page.** It shows the threshold approach is sound
+*given* that model, not that it will work on a real belt, which may not
+separate this cleanly, may drift with load or speed, or may show wear as a
+different feature entirely. Real hardware data is what turns this from "a
+reasonable first classifier" into a validated one — see
+[Status](#status) and `TODO.md`.
+
+Regenerate with `python3 analysis/classify_faults.py`.
+
 ## Architecture
 
 ```mermaid
@@ -63,6 +95,8 @@ flowchart LR
     DB -->|unanalyzed windows| Analyze["analyze_fft.py"]
     Analyze -->|fft_results| DB
     DB --> NB["analysis/*.ipynb"]
+    DB -->|fft_results| Classify["classify_faults.py"]
+    Classify -->|baselines,<br/>classifications| DB
 ```
 
 Ingestion and analysis are deliberately two separate processes talking only
@@ -75,7 +109,7 @@ through the database, not through MQTT or a shared queue — see
 main/            ESP-IDF firmware: fixed-rate sampling, windowing, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
-analysis/        Jupyter notebook + static report figures (matplotlib/scipy)
+analysis/        Notebook, static report figures, and the threshold classifier
 TODO.md          Working engineering log: open items, decisions, rationale
 ```
 
@@ -117,6 +151,15 @@ ingestion client subscribes at QoS 1 with a stable `client_id` and
 `clean_session=False`, so the broker holds messages published while it's
 offline instead of silently dropping them.
 
+**The classifier is a threshold, not a trained model — deliberately.** With
+only synthetic "worn" data (a hand-picked signal model, not an observed real
+belt), a fancier classifier — isolation forest, a supervised model — would
+fit that assumption just as confidently as a threshold does, just less
+visibly: a black-box model's weights don't tell you they're wrong until they
+are. A threshold on one physically-meaningful feature (belt-pass band
+amplitude vs. a stored baseline) is inspectable, and recalibrating it once
+real data exists is a number change, not a retrain.
+
 **The network is a phone hotspot, on purpose.** The primary WiFi network
 here enforces WPA3-only auth, which this board's (original ESP32) software WPA3
 implementation doesn't reliably negotiate. Early testing also hit
@@ -137,7 +180,8 @@ problems without touching the router config.
 | Local broker deployment | Not yet done — currently pointed at a public cloud broker as an interim step |
 | Spectrum exploration notebook | Implemented, executes cleanly against the real schema |
 | Static report figures (`generate_figures.py`) | Implemented, run against the real database — see [Analysis results](#analysis-results) |
-| Baseline capture, feature extraction, fault detection | Not started — intentionally deferred until there's real sensor data to develop it against |
+| Threshold fault classifier (`classify_faults.py`) | Implemented, 100% accuracy on held-out synthetic data — see [Fault classification](#fault-classification). **Not validated against a real belt** |
+| Statistical anomaly detection / supervised classification | Not started — README §4's steps 2–3, only worth reaching for if the threshold approach proves too brittle on real data |
 
 ## Getting started
 
@@ -164,5 +208,8 @@ Tracked in detail in [`TODO.md`](TODO.md); the near-term path is: stand up
 the local broker → validate the firmware on real hardware → run a capture
 session to pick a sample rate against the conveyor's actual mechanical
 frequencies (currently a 500Hz placeholder) → capture a known-healthy
-baseline spectrum → build feature extraction and drift detection against
-real data, in that order.
+baseline spectrum from the real belt → re-fit and re-evaluate
+`classify_faults.py`'s threshold against that real data, not the synthetic
+model it's only ever seen → only then consider README §4's steps 2–3
+(statistical anomaly detection, supervised classification) if the threshold
+turns out to be too brittle in practice.

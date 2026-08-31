@@ -154,7 +154,7 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       freq now 29.34±1.17Hz (was 29.30±0.00), worn 8.12±0.72Hz (was
       7.81±0.00) — real variance, condition separation still clean.
 
-## Signal processing / inference (deferred — separate from the backend above)
+## Signal processing / inference
 
 - [x] `/analysis` scaffolded (`analysis/explore_spectra.ipynb`,
       `analysis/requirements.txt`): reads `backend/fft_backend.sqlite3`,
@@ -191,11 +191,48 @@ until the ESP32 is publishing whole windows instead of single (x,y,z) points.
       (discrete, non-normal), just no longer literally zero-variance — and
       still finds complete separation: peak frequency U=10000, p=2.67×10⁻³⁸;
       peak amplitude U=0, p=2.56×10⁻³⁴ (current numbers, in README.md).
-- [ ] Feature extraction, baseline capture, and threshold/anomaly detection
-      go in this same notebook once there's real hardware data to develop
-      them against.
-- [ ] Capture a baseline spectrum from a known-healthy belt before attempting
-      any fault detection.
+- [x] Threshold fault classifier (`analysis/classify_faults.py`): README §4
+      step 1 of 3 ("threshold/anomaly detection on one or two features"),
+      deliberately not steps 2/3 (statistical anomaly detection, supervised
+      classification) — see the "classifier is a threshold, not a trained
+      model" note in README.md's Design decisions for why going further
+      against only-synthetic data would be actively counterproductive, not
+      just premature.
+      One feature: FFT amplitude summed over a band around the belt-pass
+      frequency (a band, not a single bin — the frequency-jitter fix above
+      means the true peak can land in an adjacent bin between windows, so a
+      single-bin lookup would sometimes miss it entirely). Baseline = mean +
+      3 std, fit on 70% of the healthy device's windows (capture order),
+      held out the other 30% for evaluation — evaluating "does healthy data
+      clear its own threshold" on the same windows used to set that
+      threshold would be circular, so those windows are excluded from
+      scoring even though they're still plotted for context.
+      `backend/storage.py` gained two tables for this: `baselines` (durable,
+      timestamped — a new row per computation, not an overwrite, so history
+      isn't lost) and `classifications` (one row per window: feature value,
+      threshold, predicted label). `analysis/classify_faults.py` is in
+      `analysis/`, not `backend/`, following README §6's layout, so it
+      imports `storage` via a `sys.path` insert rather than duplicating the
+      write functions — a deliberate, minor deviation from
+      `generate_figures.py`'s pattern (which duplicates simple read-only
+      queries instead), justified because this script *writes* using a
+      schema that needs to stay centrally defined, not read-only convenience
+      queries cheap to duplicate.
+      Bug caught before trusting the result: first run reported n=200 and
+      100% accuracy, but 70 of those 200 were the baseline-fit windows
+      themselves — scored against a threshold derived from their own values,
+      which is circular, not a real test. Fixed by excluding
+      `role=="baseline-fit"` from the scored/reported set; the honest number
+      is 130 genuinely held-out/independent windows (30 healthy + 100 worn),
+      still 100% accuracy.
+      **Caveat that matters more than the accuracy number**: evaluated only
+      against `backend/seed_sample_data.py`'s hand-picked synthetic model.
+      100% accuracy here is evidence the threshold approach is sound *given
+      that model* — it is not evidence it'll work on a real belt, which may
+      not separate this cleanly, may drift with load/speed, or may show wear
+      as a different feature entirely. Re-fitting and re-evaluating this
+      same script against real captured data is the actual next step, not
+      building a fancier classifier now.
 
 ## Project structure
 

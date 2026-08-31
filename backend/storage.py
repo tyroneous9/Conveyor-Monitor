@@ -40,12 +40,34 @@ CREATE TABLE IF NOT EXISTS fft_results (
     peak_amp REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS baselines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    feature TEXT NOT NULL,
+    mean REAL NOT NULL,
+    std REAL NOT NULL,
+    n_windows INTEGER NOT NULL,
+    computed_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS classifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER NOT NULL REFERENCES raw_windows(id),
+    device_id TEXT NOT NULL,
+    feature_value REAL NOT NULL,
+    threshold REAL NOT NULL,
+    predicted_label TEXT NOT NULL,
+    classified_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_raw_windows_device_time
     ON raw_windows(device_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_fft_results_device_time
     ON fft_results(device_id, analyzed_at);
 CREATE INDEX IF NOT EXISTS idx_fft_results_window
     ON fft_results(window_id);
+CREATE INDEX IF NOT EXISTS idx_classifications_window
+    ON classifications(window_id);
 """
 
 
@@ -125,3 +147,61 @@ def store_fft_result(conn, window_id, device_id, result, peak):
         ),
     )
     conn.commit()
+
+
+def store_baseline(conn, device_id, feature, mean, std, n_windows):
+    """Persist a computed baseline as a durable, inspectable artifact --
+    not a number silently recomputed inside a script every run. Callers
+    (see analysis/classify_faults.py) can recompute and re-store to update
+    it; each call adds a new row rather than overwriting, so history isn't
+    lost."""
+    conn.execute(
+        "INSERT INTO baselines (device_id, feature, mean, std, n_windows, computed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (device_id, feature, mean, std, n_windows, time.time()),
+    )
+    conn.commit()
+
+
+def fetch_latest_baseline(conn, device_id, feature):
+    row = conn.execute(
+        "SELECT mean, std, n_windows, computed_at FROM baselines "
+        "WHERE device_id = ? AND feature = ? ORDER BY computed_at DESC LIMIT 1",
+        (device_id, feature),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"mean": row[0], "std": row[1], "n_windows": row[2], "computed_at": row[3]}
+
+
+def store_classification(conn, window_id, device_id, feature_value, threshold, predicted_label):
+    conn.execute(
+        "INSERT INTO classifications "
+        "(window_id, device_id, feature_value, threshold, predicted_label, classified_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (window_id, device_id, feature_value, threshold, predicted_label, time.time()),
+    )
+    conn.commit()
+
+
+def fetch_fft_results(conn, device_id):
+    """All fft_results rows for a device, ordered by window id -- used by
+    the fault classifier to compute per-window features from the already-
+    stored spectrum, without recomputing the FFT."""
+    rows = conn.execute(
+        "SELECT r.id, f.sample_rate_hz, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
+        "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
+        "WHERE r.device_id = ? ORDER BY r.id",
+        (device_id,),
+    ).fetchall()
+    return [
+        {
+            "window_id": row[0],
+            "sample_rate_hz": row[1],
+            "freq_hz": json.loads(row[2]),
+            "fft_ay": json.loads(row[3]),
+            "peak_freq_hz": row[4],
+            "peak_amp": row[5],
+        }
+        for row in rows
+    ]
