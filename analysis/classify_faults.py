@@ -5,39 +5,46 @@ healthy baseline, or does it look worn?
 Deliberately the *simplest* thing in README §4's own staged progression --
 "1. Threshold/anomaly detection on one or two features... 2. Statistical
 anomaly detection... if thresholds prove too brittle... 3. Supervised
-classification... only once you have labeled examples". We have labels
-here, but they're synthetic (backend/seed_sample_data.py's hand-picked
-signal model, not an observed real belt) -- training a fancier model against
-that would just be confidently wrong in a different, harder-to-notice way
-than a threshold rule is. This stays interpretable: one feature (summed FFT
-amplitude in a band around the belt-pass frequency), one threshold
-(baseline mean + N standard deviations), inspectable and recalibratable the
-moment real hardware data exists. Steps 2/3 remain available later -- see
-TODO.md.
+classification... only once you have labeled examples". A fancier model
+would fit the quirks of the belt/load/speed combination it's trained on
+just as confidently as a threshold does, just less visibly -- a black-box
+model's weights don't announce that they're overfit. This stays
+interpretable: one feature (summed FFT amplitude in a band around the
+belt-pass frequency), one threshold (baseline mean + N standard
+deviations), recalibratable as more sessions get captured -- a number
+change, not a retrain. Steps 2/3 remain available later if this proves too
+brittle.
+
+Ground truth comes from operator-recorded capture sessions, not device_id:
+one physical device (--device-id) gets moved between a known-healthy and a
+known-worn belt on different runs, and a window is labeled by which
+--healthy-range / --worn-range its capture timestamp falls in.
 
 Baseline/classification results are stored in the `baselines` and
 `classifications` tables (backend/storage.py) as durable, inspectable
 artifacts, not numbers recomputed silently inside this script every run.
 
 Methodology note: the baseline is fit on a held-out fraction of the
-baseline device's own windows (--baseline-fraction, default 0.7, taken in
-capture order) and evaluated against the *remaining* fraction plus every
-other device's windows -- evaluating "does healthy data fall under
+healthy range's windows (--baseline-fraction, default 0.7, taken in
+capture order) and evaluated against the *remaining* healthy fraction plus
+every worn-range window -- evaluating "does healthy data fall under
 threshold" on the same windows used to set that threshold would be
 circular for the healthy class.
 
 Usage:
     pip install -r requirements.txt
-    python3 classify_faults.py
-    python3 classify_faults.py --baseline-device esp32-fake-healthy \\
-        --evaluate-devices esp32-fake-healthy esp32-fake-worn
+    python3 classify_faults.py --device-id esp32-a1b2c3 \\
+        --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
+        --worn-range 2026-08-22T09:00 2026-08-22T11:00
+
+For local dev/testing without real hardware, backend/seed_samples.py can
+seed a similar two-session dataset under one device_id.
 """
 
 import argparse
 import logging
 import os
 import sys
-import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -46,6 +53,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import storage  # noqa: E402  (reuses the schema + write functions rather than duplicating them)
+import labels  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_backend.sqlite3"
@@ -63,35 +71,22 @@ log = logging.getLogger("classify_faults")
 
 def band_amplitude(freq_hz, fft_amp, center_hz, width_hz):
     """Sum of linear FFT magnitude within [center-width/2, center+width/2]
-    -- a band, not a single bin, because realistic frequency jitter
-    (backend/seed_sample_data.py) can shift the true peak to an adjacent
-    bin between windows; a single-bin lookup would miss it."""
+    -- a band, not a single bin, because motor/belt speed drifts run to
+    run (see README) and can shift the true peak to an adjacent bin
+    between windows; a single-bin lookup would miss it."""
     lo, hi = center_hz - width_hz / 2, center_hz + width_hz / 2
     return sum(a for f, a in zip(freq_hz, fft_amp) if lo <= f <= hi)
 
 
-def true_label(device_id):
-    if "healthy" in device_id:
-        return "healthy"
-    if "worn" in device_id:
-        return "worn"
-    return None  # unknown ground truth -- real hardware, not synthetic
-
-
-def compute_baseline(conn, device_id, band_center_hz, band_width_hz, baseline_fraction):
-    windows = storage.fetch_fft_results(conn, device_id)
-    if not windows:
-        raise SystemExit(f"no fft_results found for device_id={device_id!r}")
-
-    n_fit = max(1, int(len(windows) * baseline_fraction))
-    fit_windows, holdout_windows = windows[:n_fit], windows[n_fit:]
+def compute_baseline(healthy_windows, band_center_hz, band_width_hz, baseline_fraction):
+    n_fit = max(1, int(len(healthy_windows) * baseline_fraction))
+    fit_windows, holdout_windows = healthy_windows[:n_fit], healthy_windows[n_fit:]
 
     values = np.array([band_amplitude(w["freq_hz"], w["fft_ay"], band_center_hz, band_width_hz) for w in fit_windows])
     mean, std = float(values.mean()), float(values.std())
-    storage.store_baseline(conn, device_id, FEATURE_NAME, mean, std, len(fit_windows))
     log.info(
-        "baseline from %s: %s = %.3f ± %.3f (n=%d fit windows, %d held out)",
-        device_id, FEATURE_NAME, mean, std, len(fit_windows), len(holdout_windows),
+        "baseline: %s = %.3f ± %.3f (n=%d fit windows, %d held out)",
+        FEATURE_NAME, mean, std, len(fit_windows), len(holdout_windows),
     )
     return mean, std, fit_windows, holdout_windows
 
@@ -114,7 +109,11 @@ def confusion_counts(rows):
     return tp, tn, fp, fn
 
 
-def write_report(rows, threshold, baseline_mean, baseline_std, n_std, out_path):
+def fmt_ranges(ranges):
+    return ", ".join(f"[{a:.0f}, {b:.0f}]" for a, b in ranges)
+
+
+def write_report(rows, threshold, baseline_mean, baseline_std, n_std, device_id, healthy_ranges, worn_ranges, out_path):
     tp, tn, fp, fn = confusion_counts(rows)
     n = len(rows)
     accuracy = (tp + tn) / n if n else float("nan")
@@ -122,8 +121,8 @@ def write_report(rows, threshold, baseline_mean, baseline_std, n_std, out_path):
     recall = tp / (tp + fn) if (tp + fn) else float("nan")
 
     lines = [
-        "**Against synthetic labels only** (backend/seed_sample_data.py's hand-picked "
-        "signal model) -- not validated against a real observed worn belt.",
+        f"Ground truth: device `{device_id}`, healthy range(s) {fmt_ranges(healthy_ranges)}, "
+        f"worn range(s) {fmt_ranges(worn_ranges)} (operator-recorded capture sessions).",
         "",
         f"Threshold: `{FEATURE_NAME}` > {threshold:.3f} "
         f"(baseline {baseline_mean:.3f} + {n_std:g}×{baseline_std:.3f} std)",
@@ -179,51 +178,64 @@ def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--baseline-device", default="esp32-fake-healthy")
-    parser.add_argument("--evaluate-devices", nargs="*", default=None,
-                         help="default: every distinct device_id in fft_results")
-    parser.add_argument("--band-center-hz", type=float, default=8.0,
-                         help="assumed belt-pass frequency -- placeholder until real hardware data picks one (see TODO.md)")
+    labels.add_session_args(parser)
+    parser.add_argument("--band-center-hz", type=float, default=8.0, help="belt-pass frequency to search around")
     parser.add_argument("--band-width-hz", type=float, default=6.0,
                          help="wide enough to cover the jittered peak landing in an adjacent FFT bin")
     parser.add_argument("--n-std", type=float, default=3.0, help="threshold = baseline mean + n_std * baseline std")
     parser.add_argument("--baseline-fraction", type=float, default=0.7,
-                         help="fraction of the baseline device's windows (in capture order) used to fit the baseline; rest are held out for evaluation")
+                         help="fraction of the healthy range's windows (in capture order) used to fit the baseline; rest are held out for evaluation")
     args = parser.parse_args()
 
     os.makedirs(FIG_DIR, exist_ok=True)
     conn = storage.connect(DB_PATH)
 
+    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id)
+    healthy_ranges = labels.parse_ranges(args.healthy_range)
+    worn_ranges = labels.parse_ranges(args.worn_range)
+    if not healthy_ranges:
+        raise SystemExit("--healthy-range is required (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
+    if not worn_ranges:
+        raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
+
+    all_windows = storage.fetch_fft_results(conn, device_id)
+    for w in all_windows:
+        w["label"] = labels.label_for(w["received_at"], healthy_ranges, worn_ranges)
+    healthy_windows = [w for w in all_windows if w["label"] == "healthy"]
+    worn_windows = [w for w in all_windows if w["label"] == "worn"]
+    if not healthy_windows:
+        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --healthy-range")
+    if not worn_windows:
+        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --worn-range")
+
     mean, std, fit_windows, holdout_windows = compute_baseline(
-        conn, args.baseline_device, args.band_center_hz, args.band_width_hz, args.baseline_fraction
+        healthy_windows, args.band_center_hz, args.band_width_hz, args.baseline_fraction
     )
     threshold = mean + args.n_std * std
-
-    if args.evaluate_devices is None:
-        evaluate_devices = [r[0] for r in conn.execute("SELECT DISTINCT device_id FROM fft_results")]
-    else:
-        evaluate_devices = args.evaluate_devices
+    storage.store_baseline(conn, device_id, FEATURE_NAME, mean, std, len(fit_windows))
 
     rows = []
     for w in fit_windows:
         value = band_amplitude(w["freq_hz"], w["fft_ay"], args.band_center_hz, args.band_width_hz)
-        rows.append({"window_id": w["window_id"], "value": value, "true": true_label(args.baseline_device),
+        rows.append({"window_id": w["window_id"], "value": value, "true": "healthy",
                       "predicted": "worn" if value > threshold else "healthy", "role": "baseline-fit"})
 
-    for device_id in evaluate_devices:
-        windows = holdout_windows if device_id == args.baseline_device else storage.fetch_fft_results(conn, device_id)
-        role = "held-out" if device_id == args.baseline_device else "evaluated"
+    for windows, true, role in (
+        (holdout_windows, "healthy", "held-out"),
+        (worn_windows, "worn", "evaluated"),
+    ):
         classified = classify_windows(conn, windows, device_id, threshold, args.band_center_hz, args.band_width_hz)
         for c in classified:
-            rows.append({**c, "true": true_label(device_id), "role": role})
-        log.info("classified %d window(s) from %s (%s)", len(classified), device_id, role)
+            rows.append({**c, "true": true, "role": role})
+        log.info("classified %d window(s) (%s)", len(classified), role)
 
     # Excludes role=="baseline-fit": those windows set the threshold, so
     # evaluating them against that same threshold is circular, not a real
     # test (fit windows still appear in the plot, for context, via `rows`).
-    labeled_rows = [r for r in rows if r["true"] is not None and r["role"] != "baseline-fit"]
+    labeled_rows = [r for r in rows if r["role"] != "baseline-fit"]
     report_lines, (accuracy, precision, recall) = write_report(
-        labeled_rows, threshold, mean, std, args.n_std, os.path.join(FIG_DIR, "classification_report.md")
+        labeled_rows, threshold, mean, std, args.n_std, device_id, healthy_ranges, worn_ranges,
+        os.path.join(FIG_DIR, "classification_report.md"),
     )
     plot_classification(rows, threshold, mean, std, os.path.join(FIG_DIR, "classification.png"))
 

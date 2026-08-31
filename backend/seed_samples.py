@@ -17,10 +17,15 @@ when worn (README §4's description of what a worn belt does to a spectrum).
 Small per-window jitter and a Gaussian noise floor keep consecutive windows
 from being identical repeats.
 
+Real deployments key healthy/worn off capture time range, not device_id
+(see analysis/labels.py) -- both conditions here default to the same
+device_id for that reason, distinguished only by --session-offset-hours so
+the two runs land in non-overlapping time ranges.
+
 Usage:
     pip install -r requirements.txt
-    python3 seed_fake_data.py --condition healthy --num-windows 20
-    python3 seed_fake_data.py --condition worn --num-windows 20
+    python3 seed_samples.py --condition healthy --num-windows 20 --session-offset-hours 4
+    python3 seed_samples.py --condition worn --num-windows 20 --session-offset-hours 0
 """
 
 import argparse
@@ -84,17 +89,38 @@ def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, 
     motor_amp = jitter(rng, 0.05) * load
     motor_2h_amp = jitter(rng, 0.01) * load
 
+    # Real belt-pass amplitude isn't cleanly bimodal: a healthy belt
+    # occasionally throws a noise burst (debris, a transient slip) that
+    # reads worn for one window, and a worn belt has mild/early-stage
+    # windows that still read close to the healthy range. These low-rate
+    # overlap events are what should make classify_faults.py produce a
+    # handful of real misclassifications instead of textbook-perfect
+    # separation.
     if condition == "worn":
-        belt_amp = jitter(rng, 0.35) * load
-        belt_2h_amp = jitter(rng, 0.12) * load
-        belt_3h_amp = jitter(rng, 0.05) * load
+        if rng.random() < 0.08:
+            belt_amp = jitter(rng, 0.05)
+            belt_2h_amp = jitter(rng, 0.014)
+            belt_3h_amp = jitter(rng, 0.006)
+        else:
+            belt_amp = jitter(rng, 0.35)
+            belt_2h_amp = jitter(rng, 0.12)
+            belt_3h_amp = jitter(rng, 0.05)
     else:
-        # Clearly subordinate to motor_amp: a healthy belt should barely
-        # register at its pass frequency, so the motor fundamental stays
-        # the dominant peak (see the note on this bug in TODO.md).
-        belt_amp = jitter(rng, 0.015) * load
-        belt_2h_amp = jitter(rng, 0.004) * load
-        belt_3h_amp = jitter(rng, 0.002) * load
+        # Clearly subordinate to motor_amp otherwise: a healthy belt should
+        # barely register at its pass frequency, so the motor fundamental
+        # stays the dominant peak.
+        if rng.random() < 0.06:
+            belt_amp = jitter(rng, 0.09)
+            belt_2h_amp = jitter(rng, 0.025)
+            belt_3h_amp = jitter(rng, 0.010)
+        else:
+            belt_amp = jitter(rng, 0.015)
+            belt_2h_amp = jitter(rng, 0.004)
+            belt_3h_amp = jitter(rng, 0.002)
+
+    belt_amp *= load
+    belt_2h_amp *= load
+    belt_3h_amp *= load
 
     harmonics = [
         (motor_freq, motor_amp),
@@ -120,10 +146,13 @@ def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--condition", choices=("healthy", "worn"), required=True)
-    parser.add_argument("--device-id", default=None, help="default: esp32-fake-<condition>")
+    parser.add_argument("--device-id", default="esp32-dev-test",
+                         help="shared across both conditions -- a real device doesn't know its own belt condition either")
     parser.add_argument("--num-windows", type=int, default=20)
     parser.add_argument("--window-interval-s", type=float, default=60.0,
                          help="simulated time between windows (default: 20 windows ~= 20 simulated minutes)")
+    parser.add_argument("--session-offset-hours", type=float, default=0.0,
+                         help="shift this session back by N hours from now, so a healthy and a worn run don't land in overlapping time ranges")
     parser.add_argument("--sample-rate-hz", type=float, default=500.0, help="matches CONFIG_SAMPLE_RATE_HZ default")
     parser.add_argument("--window-size", type=int, default=256, help="matches CONFIG_SAMPLE_WINDOW_SIZE default")
     parser.add_argument("--motor-freq-hz", type=float, default=29.2, help="~1750 RPM small AC motor")
@@ -131,13 +160,15 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="for reproducible output")
     args = parser.parse_args()
 
-    device_id = args.device_id or f"esp32-fake-{args.condition}"
+    device_id = args.device_id
     rng = np.random.default_rng(args.seed)
     conn = storage.connect(DB_PATH)
 
     load_trajectory = generate_load_trajectory(rng, args.num_windows)
 
-    session_start = time.time() - (args.num_windows - 1) * args.window_interval_s
+    session_start = (
+        time.time() - args.session_offset_hours * 3600 - (args.num_windows - 1) * args.window_interval_s
+    )
     for i in range(args.num_windows):
         ax, ay, az = generate_window(
             rng, args.condition, args.sample_rate_hz, args.window_size,

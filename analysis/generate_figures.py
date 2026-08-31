@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
 """Generate static report figures + a summary table from fft_results.
 
-Reads backend/fft_backend.sqlite3 (real output of backend/analyze_fft.py --
-no synthetic shortcuts taken here) and writes plain PNG plots plus a
-markdown summary table to analysis/figures/. Nothing here is interactive:
-matplotlib for the plots, scipy.stats for a real significance test on the
-healthy/worn separation, output committed as static images for the README.
+Reads backend/fft_backend.sqlite3 (real output of backend/analyze_fft.py)
+and writes plain PNG plots plus a markdown summary table to
+analysis/figures/. Nothing here is interactive: matplotlib for the plots,
+scipy.stats for a real significance test on the healthy/worn separation,
+output committed as static images for the README.
+
+Healthy vs. worn windows come from one device_id, split by which
+--healthy-range / --worn-range a window's capture timestamp falls in (see
+analysis/labels.py) -- device_id itself doesn't encode belt condition.
 
 Usage:
     pip install -r requirements.txt
-    python3 generate_figures.py [--healthy-device ID] [--worn-device ID]
+    python3 generate_figures.py --device-id esp32-a1b2c3 \\
+        --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
+        --worn-range 2026-08-22T09:00 2026-08-22T11:00
 """
 
 import argparse
 import json
 import os
 import sqlite3
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import labels  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_backend.sqlite3"
@@ -33,34 +43,40 @@ HEALTHY_COLOR = "#2a78d6"
 WORN_COLOR = "#d03b3b"
 
 
-def fetch_window(conn, device_id):
-    """First window for device_id, raw + spectrum, joined."""
-    row = conn.execute(
-        "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
-        "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
-        "WHERE r.device_id = ? ORDER BY r.id LIMIT 1",
-        (device_id,),
-    ).fetchone()
-    if row is None:
-        raise SystemExit(f"no windows found for device_id={device_id!r}")
-    return {
-        "sample_rate_hz": row[0],
-        "ay": json.loads(row[1]),
-        "freq_hz": json.loads(row[2]),
-        "fft_ay": json.loads(row[3]),
-        "peak_freq_hz": row[4],
-        "peak_amp": row[5],
-    }
+def fetch_window(conn, device_id, ranges):
+    """First window for device_id inside any of `ranges`, raw + spectrum, joined."""
+    for start, end in ranges:
+        row = conn.execute(
+            "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
+            "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
+            "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id LIMIT 1",
+            (device_id, start, end),
+        ).fetchone()
+        if row is not None:
+            return {
+                "sample_rate_hz": row[0],
+                "ay": json.loads(row[1]),
+                "freq_hz": json.loads(row[2]),
+                "fft_ay": json.loads(row[3]),
+                "peak_freq_hz": row[4],
+                "peak_amp": row[5],
+            }
+    raise SystemExit(f"no windows found for device_id={device_id!r} in the given range(s)")
 
 
-def fetch_series(conn, device_id):
-    rows = conn.execute(
-        "SELECT peak_freq_hz, peak_amp FROM fft_results WHERE device_id = ? ORDER BY id",
-        (device_id,),
-    ).fetchall()
-    if not rows:
-        raise SystemExit(f"no fft_results found for device_id={device_id!r}")
-    return np.array([r[0] for r in rows]), np.array([r[1] for r in rows])
+def fetch_series(conn, device_id, ranges):
+    peak_freq, peak_amp = [], []
+    for start, end in ranges:
+        rows = conn.execute(
+            "SELECT f.peak_freq_hz, f.peak_amp FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
+            "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id",
+            (device_id, start, end),
+        ).fetchall()
+        peak_freq.extend(r[0] for r in rows)
+        peak_amp.extend(r[1] for r in rows)
+    if not peak_freq:
+        raise SystemExit(f"no fft_results found for device_id={device_id!r} in the given range(s)")
+    return np.array(peak_freq), np.array(peak_amp)
 
 
 def plot_spectrum(h, w, out_path):
@@ -179,18 +195,25 @@ def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--healthy-device", default="esp32-fake-healthy")
-    parser.add_argument("--worn-device", default="esp32-fake-worn")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    labels.add_session_args(parser)
     args = parser.parse_args()
 
     os.makedirs(FIG_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
 
-    h_window = fetch_window(conn, args.healthy_device)
-    w_window = fetch_window(conn, args.worn_device)
-    h_freq, h_amp = fetch_series(conn, args.healthy_device)
-    w_freq, w_amp = fetch_series(conn, args.worn_device)
+    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id)
+    healthy_ranges = labels.parse_ranges(args.healthy_range)
+    worn_ranges = labels.parse_ranges(args.worn_range)
+    if not healthy_ranges:
+        raise SystemExit("--healthy-range is required (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
+    if not worn_ranges:
+        raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
+
+    h_window = fetch_window(conn, device_id, healthy_ranges)
+    w_window = fetch_window(conn, device_id, worn_ranges)
+    h_freq, h_amp = fetch_series(conn, device_id, healthy_ranges)
+    w_freq, w_amp = fetch_series(conn, device_id, worn_ranges)
 
     plot_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_comparison.png"))
     plot_waveform(h_window, w_window, os.path.join(FIG_DIR, "waveform_comparison.png"))

@@ -82,8 +82,8 @@ def connect(db_path):
 def store_window(conn, device_id, payload, received_at=None):
     """Write one raw accel window as-is. Returns the new row's id.
 
-    received_at defaults to now; callers backdating synthetic sessions
-    (see backend/seed_fake_data.py) can override it.
+    received_at defaults to now; callers backdating a session (see
+    backend/seed_samples.py) can override it.
     """
     cur = conn.execute(
         "INSERT INTO raw_windows (device_id, received_at, sample_rate_hz, ax, ay, az) "
@@ -186,10 +186,11 @@ def store_classification(conn, window_id, device_id, feature_value, threshold, p
 
 def fetch_fft_results(conn, device_id):
     """All fft_results rows for a device, ordered by window id -- used by
-    the fault classifier to compute per-window features from the already-
-    stored spectrum, without recomputing the FFT."""
+    the fault classifier to compute per-window features (and label them by
+    capture time -- see analysis/labels.py) from the already-stored
+    spectrum, without recomputing the FFT."""
     rows = conn.execute(
-        "SELECT r.id, f.sample_rate_hz, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
+        "SELECT r.id, r.received_at, f.sample_rate_hz, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
         "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
         "WHERE r.device_id = ? ORDER BY r.id",
         (device_id,),
@@ -197,11 +198,12 @@ def fetch_fft_results(conn, device_id):
     return [
         {
             "window_id": row[0],
-            "sample_rate_hz": row[1],
-            "freq_hz": json.loads(row[2]),
-            "fft_ay": json.loads(row[3]),
-            "peak_freq_hz": row[4],
-            "peak_amp": row[5],
+            "received_at": row[1],
+            "sample_rate_hz": row[2],
+            "freq_hz": json.loads(row[3]),
+            "fft_ay": json.loads(row[4]),
+            "peak_freq_hz": row[5],
+            "peak_amp": row[6],
         }
         for row in rows
     ]

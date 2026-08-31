@@ -86,6 +86,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
+/* Bounds how much a network drop can queue up in the client's outbox before
+ * windows start getting dropped -- enough to ride out a ~10s hotspot hiccup
+ * at the default sample rate/window size without growing unbounded on a
+ * memory-constrained device. */
+#define OUTBOX_LIMIT_BYTES (JSON_BUFFER_SIZE * 8)
+
 static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
@@ -99,6 +105,14 @@ static void mqtt_app_start(void)
          * frequent enough that it doesn't look idle (see TODO.md). The
          * client pings at roughly half this interval. */
         .session.keepalive = 30,
+        /* QoS 1 publishes queue in this outbox and get resent on reconnect
+         * (auto-reconnect is on by default) instead of being dropped the
+         * moment the link blips -- see the outbox-full handling in
+         * publish_task. */
+        .outbox.limit = OUTBOX_LIMIT_BYTES,
+        /* Default is 10s; reconnect quickly so a brief hotspot drop doesn't
+         * let the outbox back up any longer than it has to. */
+        .network.reconnect_timeout_ms = 2000,
     };
 
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -163,10 +177,6 @@ static void publish_task(void *arg)
         if (xTaskNotifyWait(0, 0, &ready_buf, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        if (!s_mqtt_connected) {
-            ESP_LOGW(TAG, "MQTT not connected, dropping window");
-            continue;
-        }
 
         size_t len;
         if (!build_window_json(&s_windows[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
@@ -174,8 +184,19 @@ static void publish_task(void *arg)
             continue;
         }
 
-        esp_mqtt_client_publish(s_mqtt_client, s_device_topic, s_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
-        ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
+        /* Publish unconditionally, even while s_mqtt_connected is false: at
+         * QoS 1 the client queues into its outbox (bounded by
+         * OUTBOX_LIMIT_BYTES above) and flushes it on reconnect, so a brief
+         * drop no longer means a silently lost window. */
+        int msg_id = esp_mqtt_client_publish(s_mqtt_client, s_device_topic, s_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
+        if (msg_id == -2) {
+            ESP_LOGW(TAG, "Outbox full, dropping window (broker unreachable too long)");
+        } else if (!s_mqtt_connected) {
+            ESP_LOGI(TAG, "Queued %d-sample window for %s while disconnected (outbox=%d bytes)",
+                     WINDOW_SIZE, s_device_topic, esp_mqtt_client_get_outbox_size(s_mqtt_client));
+        } else {
+            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
+        }
     }
 }
 

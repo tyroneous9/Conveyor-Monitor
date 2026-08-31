@@ -1,4 +1,4 @@
-| Metric | Healthy (n=100) | Worn (n=100) | Mann-Whitney U |
+| Metric | Healthy (n=350) | Worn (n=350) | Mann-Whitney U |
 |---|---|---|---|
-| Peak frequency (Hz) | 29.34 ± 1.17 | 8.12 ± 0.72 | U=10000, p=2.67e-38 |
-| Peak amplitude (g) | 3.01 ± 0.25 | 21.03 ± 1.62 | U=0, p=2.56e-34 |
+| Peak frequency (Hz) | 28.04 ± 4.35 | 9.01 ± 4.57 | U=116793, p=1.93e-110 |
+| Peak amplitude (g) | 3.88 ± 1.13 | 22.17 ± 7.93 | U=6149, p=2.88e-94 |

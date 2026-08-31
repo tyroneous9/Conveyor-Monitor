@@ -1,0 +1,26 @@
+[Unit]
+Description=Conveyor Monitor - MQTT ingestion (ingest.py)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Placeholder: replace with the account this runs as on your Pi.
+User=pi
+WorkingDirectory=/home/pi/Conveyor-Monitor/backend
+# Broker is colocated on the same Pi -- ingest.py's own default already
+# assumes localhost, this is just explicit about it. Override here (or in
+# an EnvironmentFile=) if the broker ever moves to a different host.
+Environment=MQTT_BROKER_HOST=localhost
+# Placeholder: point this at the venv where `pip install -r
+# backend/requirements.txt` was run.
+ExecStart=/home/pi/Conveyor-Monitor/backend/venv/bin/python3 ingest.py
+# Restarts the process if it crashes outright (e.g. an unhandled
+# exception). Transient MQTT drops don't need this -- paho's
+# client.loop_forever() already retries the connection on its own; this is
+# a backstop for failures below that layer.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,10 @@
-**Against synthetic labels only** (backend/seed_sample_data.py's hand-picked signal model) -- not validated against a real observed worn belt.
+Ground truth: device `esp32-dev-test`, healthy range(s) [1787958507, 1787965489], worn range(s) [1788131307, 1788138289] (operator-recorded capture sessions).
 
-Threshold: `belt_band_amplitude` > 2.351 (baseline 1.925 + 3×0.142 std)
+Threshold: `belt_band_amplitude` > 9.573 (baseline 2.608 + 3×2.322 std)
 
 | | Predicted healthy | Predicted worn |
 |---|---|---|
-| **True healthy** | 30 | 0 |
-| **True worn** | 0 | 100 |
+| **True healthy** | 101 | 5 |
+| **True worn** | 27 | 323 |
 
-Accuracy: 100.0% · Precision: 100.0% · Recall: 100.0% (n=130)
+Accuracy: 93.0% · Precision: 98.5% · Recall: 92.3% (n=456)

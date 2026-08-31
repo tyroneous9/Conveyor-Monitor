@@ -2,13 +2,19 @@ menu "Example Configuration"
 
     config EXAMPLE_MQTT_BROKER_URI
         string "MQTT broker URI"
-        default "mqtt://test.mosquitto.org:1883"
+        default "mqtt://raspberrypi.local:1883"
         help
             URI of the MQTT broker to connect to.
 
-            - Public test broker (no setup, not private): mqtt://test.mosquitto.org:1883
-            - A broker on your own network (e.g. Mosquitto running on a PC/Raspberry Pi):
-              mqtt://<that device's LAN IP>:1883
+            Default assumes a Mosquitto broker running on the Raspberry Pi
+            itself (see deploy/mosquitto/), reachable via the mDNS hostname
+            Raspberry Pi OS advertises out of the box (avahi-daemon). If mDNS
+            doesn't resolve on your network (some hotspots/routers block it),
+            replace this with the Pi's LAN IP instead: mqtt://<pi's LAN IP>:1883
+
+            For quick experiments without standing up a broker at all, a
+            public test broker also works (not private, don't use for real
+            data): mqtt://test.mosquitto.org:1883
 
     config MPU6050_SDA_GPIO
         int "MPU6050 I2C SDA GPIO"
