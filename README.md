@@ -140,15 +140,41 @@ static report figures.
 A few choices here aren't the obvious first pick, so they're worth
 explaining.
 
-**Sampling is timer-driven, not delay-driven, and double-buffered.**
-A naive `vTaskDelay` loop looks fine until you check the numbers: this
-board's FreeRTOS tick runs at 100Hz (10ms resolution), which rounds a
-500Hz/2ms sample period down to zero ticks and samples uncontrolled.
-So the firmware uses `esp_timer` instead — hardware-backed, independent of
-the FreeRTOS tick — to fire a minimal read-and-store callback at a fixed
-rate, alternating between two capture buffers. JSON serialization and the
-network publish run in a separate task, so a stalled MQTT publish never
-delays the next sample.
+**Sampling is timer-driven, not delay-driven.** A naive `vTaskDelay` loop
+looks fine until you check the numbers: this board's FreeRTOS tick runs at
+100Hz (10ms resolution), which rounds a 500Hz/2ms sample period down to
+zero ticks and samples uncontrolled. So the firmware uses `esp_timer`
+instead — hardware-backed, independent of the FreeRTOS tick — to fire a
+minimal read-and-store callback (`sample_timer_cb`) at a fixed rate. JSON
+serialization and the network publish run in a separate FreeRTOS task
+(`publish_task`), so a stalled MQTT publish never delays the next sample.
+
+**Sampling and publishing hand off capture buffers through two FreeRTOS
+queues, not a shared index.** The first version of this split used a
+2-element array and one `volatile int` the timer callback toggled between
+captures, with `xTaskNotify` telling `publish_task` which half was ready.
+That has a race condition built in: it assumes `publish_task` always
+finishes reading a buffer before the timer wraps back around to refill it.
+Nothing enforced that assumption — a publish slower than one capture
+period (a blocked socket write, a stalled MQTT client during a reconnect)
+let `sample_timer_cb` start overwriting a buffer `publish_task` was still
+mid-read on, silently corrupting the capture. No crash, no log, just wrong
+data in whatever samples happened to land in the torn buffer.
+
+The fix replaces the shared index with a small buffer pool gated by two
+queues: `s_free_queue` holds indices of buffers safe to fill, `s_ready_queue`
+holds indices of buffers that are full and waiting to publish.
+`sample_timer_cb` checks a buffer out of `s_free_queue` before writing into
+it and hands the index to `s_ready_queue` once the capture is complete;
+`publish_task` blocks on `s_ready_queue`, and returns the buffer to
+`s_free_queue` once it's done publishing (on every exit path, including a
+JSON-encoding failure — the earlier notify-based version had no return path
+at all, since a raw index didn't need one). A buffer is owned by exactly
+one side at a time, enforced by the queue instead of a timing assumption,
+so there's no window where both can touch it. If `publish_task` ever falls
+behind by a full capture period, `s_free_queue` comes up empty and
+`sample_timer_cb` drops the sample and logs it — a visible, bounded failure
+instead of silent data corruption.
 
 **Ingestion and analysis run as separate processes.** `ingest.py` does one
 thing: validate an incoming capture and write it to SQLite. `analyze_fft.py`

@@ -5,10 +5,12 @@
  *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
  *   2. Connects to a plain (non-TLS) MQTT broker
  *   3. Samples the MPU6050 accelerometer at a fixed rate (esp_timer, not the
- *      FreeRTOS tick -- see the comment on s_sample_timer) into one of two
- *      alternating capture buffers, and publishes each full capture as one
- *      JSON message to sensors/<device_id>/vibration/raw. See
- *      backend/ingest.py for the consumer side of this exact contract.
+ *      FreeRTOS tick -- see the comment on s_sample_timer) into a small pool
+ *      of capture buffers, handed off to a separate publish task over a pair
+ *      of FreeRTOS queues (see the comment on s_free_queue), which publishes
+ *      each full capture as one JSON message to
+ *      sensors/<device_id>/vibration/raw. See backend/ingest.py for the
+ *      consumer side of this exact contract.
  */
 
 #include <stdbool.h>
@@ -21,6 +23,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -50,15 +53,23 @@ static volatile bool s_mqtt_connected;
 static mpu6050_handle_t s_mpu6050;
 static char s_device_topic[64];
 static esp_timer_handle_t s_sample_timer;
-static TaskHandle_t s_publish_task_handle;
 static char s_json_buf[JSON_BUFFER_SIZE];
 
-/* Double-buffered so a slow MQTT publish (network I/O, in publish_task)
- * never blocks or delays the next sample due (in sample_timer_cb) -- the
- * timer keeps filling the other buffer while the full one is being sent. */
-static sample_capture_t s_captures[2];
-static volatile int s_fill_buf;
-static int s_fill_index;
+/* A CAPTURE_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
+ * queues, so a slow MQTT publish (network I/O, in publish_task) never blocks
+ * or delays the next sample due (in sample_timer_cb):
+ *   - s_free_queue holds indices of buffers safe to fill. sample_timer_cb
+ *     checks one out to fill and, once full, hands its index to
+ *     s_ready_queue.
+ *   - publish_task blocks on s_ready_queue, publishes the capture, then
+ *     returns the index to s_free_queue.
+ * If s_free_queue is ever empty, publish_task has fallen behind by a full
+ * capture -- sample_timer_cb drops the sample and logs it rather than
+ * overwriting a buffer publish_task might still be reading. */
+#define CAPTURE_QUEUE_DEPTH 2
+static sample_capture_t s_captures[CAPTURE_QUEUE_DEPTH];
+static QueueHandle_t s_free_queue;
+static QueueHandle_t s_ready_queue;
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -171,16 +182,17 @@ static bool build_capture_json(const sample_capture_t *cap, char *buf, size_t bu
 static void publish_task(void *arg)
 {
     (void)arg;
-    uint32_t ready_buf;
+    int ready_buf;
 
     while (1) {
-        if (xTaskNotifyWait(0, 0, &ready_buf, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_ready_queue, &ready_buf, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
         size_t len;
         if (!build_capture_json(&s_captures[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
             ESP_LOGE(TAG, "Capture JSON exceeded %d-byte buffer, dropping capture", JSON_BUFFER_SIZE);
+            xQueueSend(s_free_queue, &ready_buf, 0);
             continue;
         }
 
@@ -197,6 +209,8 @@ static void publish_task(void *arg)
         } else {
             ESP_LOGI(TAG, "Published %d-sample capture to %s (%d bytes)", CAPTURE_SIZE, s_device_topic, (int)len);
         }
+
+        xQueueSend(s_free_queue, &ready_buf, 0);
     }
 }
 
@@ -208,6 +222,21 @@ static void publish_task(void *arg)
 static void sample_timer_cb(void *arg)
 {
     (void)arg;
+    /* Which pool buffer this capture is filling, or -1 between captures.
+     * Static: this callback only ever runs from the single esp_timer task,
+     * one invocation at a time, so there's no concurrent access to guard
+     * against. */
+    static int s_active_buf = -1;
+    static int s_fill_index;
+
+    if (s_active_buf < 0) {
+        if (xQueueReceive(s_free_queue, &s_active_buf, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free capture buffer)");
+            return;
+        }
+        s_fill_index = 0;
+    }
+
     mpu6050_measurements_t accel;
     esp_err_t err = mpu6050_read_accel(s_mpu6050, &accel);
     if (err != ESP_OK) {
@@ -215,17 +244,15 @@ static void sample_timer_cb(void *arg)
         return;
     }
 
-    sample_capture_t *buf = &s_captures[s_fill_buf];
+    sample_capture_t *buf = &s_captures[s_active_buf];
     buf->ax[s_fill_index] = accel.accel_x;
     buf->ay[s_fill_index] = accel.accel_y;
     buf->az[s_fill_index] = accel.accel_z;
     s_fill_index++;
 
     if (s_fill_index >= CAPTURE_SIZE) {
-        int ready_buf = s_fill_buf;
-        s_fill_buf = 1 - s_fill_buf;
-        s_fill_index = 0;
-        xTaskNotify(s_publish_task_handle, (uint32_t)ready_buf, eSetValueWithOverwrite);
+        xQueueSend(s_ready_queue, &s_active_buf, 0);
+        s_active_buf = -1;
     }
 }
 
@@ -251,7 +278,14 @@ void app_main(void)
 
     mqtt_app_start();
 
-    xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, &s_publish_task_handle);
+    s_free_queue = xQueueCreate(CAPTURE_QUEUE_DEPTH, sizeof(int));
+    s_ready_queue = xQueueCreate(CAPTURE_QUEUE_DEPTH, sizeof(int));
+    configASSERT(s_free_queue != NULL && s_ready_queue != NULL);
+    for (int i = 0; i < CAPTURE_QUEUE_DEPTH; i++) {
+        xQueueSend(s_free_queue, &i, 0);
+    }
+
+    xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
 
     const esp_timer_create_args_t timer_args = {
         .callback = sample_timer_cb,
