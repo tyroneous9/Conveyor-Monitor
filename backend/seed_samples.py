@@ -50,7 +50,24 @@ def sine_sum(t, harmonics, phase=0.0):
     return total
 
 
-def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, belt_freq_hz):
+def generate_load_trajectory(rng, num_windows, step_std=0.06, min_load=0.55, max_load=1.6):
+    """Load factor per window, 1.0 = nameplate load.
+
+    A conveyor's throughput isn't constant -- it ramps with upstream
+    demand, not just a fixed nominal load with independent per-window
+    jitter. Modeled as a clipped random walk so load drifts smoothly
+    across a run (correlated window to window) instead of resetting
+    every window like the existing jitter() calls do.
+    """
+    load = np.empty(num_windows)
+    current = 1.0
+    for i in range(num_windows):
+        current = np.clip(current + rng.normal(0, step_std), min_load, max_load)
+        load[i] = current
+    return load
+
+
+def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, belt_freq_hz, load=1.0):
     t = np.arange(window_size) / sample_rate_hz
 
     # Wide enough to occasionally cross an FFT bin boundary (1.95 Hz at
@@ -59,23 +76,25 @@ def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, 
     # varies run to run. Too-small jitter here previously made peak
     # frequency bit-identical across every window (zero variance), which
     # broke a t-test in analysis/generate_figures.py -- see TODO.md.
-    motor_freq = jitter(rng, motor_freq_hz, spread=0.05)
+    # Higher load also causes real motor slip: heavier load -> slightly
+    # lower shaft speed for a fixed-frequency AC induction motor.
+    motor_freq = jitter(rng, motor_freq_hz, spread=0.05) * (1 - 0.03 * (load - 1))
     belt_freq = jitter(rng, belt_freq_hz, spread=0.12)
 
-    motor_amp = jitter(rng, 0.05)
-    motor_2h_amp = jitter(rng, 0.01)
+    motor_amp = jitter(rng, 0.05) * load
+    motor_2h_amp = jitter(rng, 0.01) * load
 
     if condition == "worn":
-        belt_amp = jitter(rng, 0.35)
-        belt_2h_amp = jitter(rng, 0.12)
-        belt_3h_amp = jitter(rng, 0.05)
+        belt_amp = jitter(rng, 0.35) * load
+        belt_2h_amp = jitter(rng, 0.12) * load
+        belt_3h_amp = jitter(rng, 0.05) * load
     else:
         # Clearly subordinate to motor_amp: a healthy belt should barely
         # register at its pass frequency, so the motor fundamental stays
         # the dominant peak (see the note on this bug in TODO.md).
-        belt_amp = jitter(rng, 0.015)
-        belt_2h_amp = jitter(rng, 0.004)
-        belt_3h_amp = jitter(rng, 0.002)
+        belt_amp = jitter(rng, 0.015) * load
+        belt_2h_amp = jitter(rng, 0.004) * load
+        belt_3h_amp = jitter(rng, 0.002) * load
 
     harmonics = [
         (motor_freq, motor_amp),
@@ -85,7 +104,9 @@ def generate_window(rng, condition, sample_rate_hz, window_size, motor_freq_hz, 
         (3 * belt_freq, belt_3h_amp),
     ]
 
-    noise_std = 0.008
+    # Heavier load also means a noisier mechanical environment (more
+    # strain, more incidental rattle), not just bigger harmonic peaks.
+    noise_std = 0.008 * (0.5 + 0.5 * load)
     vib_ax = sine_sum(t, harmonics, phase=0.0)
     vib_ay = sine_sum(t, harmonics, phase=np.pi / 4)  # transverse axis, phase-shifted
 
@@ -114,11 +135,13 @@ def main():
     rng = np.random.default_rng(args.seed)
     conn = storage.connect(DB_PATH)
 
+    load_trajectory = generate_load_trajectory(rng, args.num_windows)
+
     session_start = time.time() - (args.num_windows - 1) * args.window_interval_s
     for i in range(args.num_windows):
         ax, ay, az = generate_window(
             rng, args.condition, args.sample_rate_hz, args.window_size,
-            args.motor_freq_hz, args.belt_freq_hz,
+            args.motor_freq_hz, args.belt_freq_hz, load=load_trajectory[i],
         )
         payload = {"sample_rate_hz": args.sample_rate_hz, "ax": ax, "ay": ay, "az": az}
         received_at = session_start + i * args.window_interval_s

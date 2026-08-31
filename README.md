@@ -1,36 +1,39 @@
 # Conveyor Monitor
 
-Predictive maintenance for an industrial conveyor belt: a ESP32 samples vibration
-off an MPU6050 accelerometer, streams it over MQTT to a
-Raspberry Pi, and a decoupled batch job turns each window into a frequency
-spectrum via FFT. The eventual goal is catching belt wear from how the
-vibration signature drifts over time, before it causes downtime — this repo
-covers the sensing → transport → storage → spectrum pipeline, plus a first
-threshold-based classifier (below) that's only ever seen synthetic data;
-validating it against a real belt is the next phase (see [Status](#status)).
+Predictive maintenance for an industrial conveyor belt. An ESP32 samples
+vibration off an MPU6050 accelerometer, streams it over MQTT to a Raspberry
+Pi, and a separate batch job turns each window into a frequency spectrum via
+FFT. The idea is to catch belt wear from how the vibration signature drifts
+over time, before it turns into downtime.
+
+This repo covers the sensing → transport → storage → spectrum pipeline,
+plus a first threshold-based classifier described below. That classifier
+has only ever seen synthetic data — validating it against a real belt is
+the next phase (see [Status](#status)).
 
 ## Analysis results
 
-Real output from `backend/analyze_fft.py` on 200 windows (100 healthy, 100
-worn — synthetic test data, see [Status](#status)), plotted with
-`analysis/generate_figures.py` (matplotlib + scipy, static PNGs, no
-interactivity or external hosting involved). Frequency jitter between
-windows is sized to occasionally cross an FFT bin boundary (motor RPM and,
-more weakly, belt-pass frequency both drift run to run on a real machine —
-see `backend/seed_sample_data.py`), so peak frequency isn't a frozen
-constant here the way an earlier, less realistic pass had it.
+Real output from `backend/analyze_fft.py` on 200 synthetic windows (100
+healthy, 100 worn — see [Status](#status) for why it's synthetic), plotted
+with `analysis/generate_figures.py` (matplotlib + scipy, static PNGs,
+nothing fancier).
+
+Motor RPM, and more weakly belt-pass frequency, both drift a bit from run
+to run on a real machine, so I built that jitter into the synthetic
+generator (`backend/seed_samples.py`) instead of freezing peak frequency at
+one value.
 
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
 
 The belt-pass frequency (7.8 Hz) is where a worn belt actually shows up —
 the motor's own rotation frequency (29.3 Hz) barely moves between
-conditions. Same finding in the raw signal, before any transform, though
-far less obvious by eye than in frequency space:
+conditions. Same story in the raw signal, before any transform, though it's
+much less obvious there than in frequency space:
 
 ![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
 
-Across all 100 independent windows per condition, not just one cherry-picked
-window:
+And it holds across all 100 independent windows per condition, not just one
+cherry-picked pair:
 
 ![Repeatability across independent windows](analysis/figures/repeatability.png)
 
@@ -39,16 +42,16 @@ window:
 | Peak frequency (Hz) | 29.34 ± 1.17 | 8.12 ± 0.72 | U=10000, p=2.67×10⁻³⁸ |
 | Peak amplitude (g) | 3.01 ± 0.25 | 21.03 ± 1.62 | U=0, p=2.56×10⁻³⁴ |
 
-Mann-Whitney U, not a t-test: peak frequency is bin-quantized (clustered at
-a handful of discrete FFT bins, not continuous), which violates a t-test's
-approximate-normality assumption even with real variance present — and an
-earlier pass had exactly zero variance in both groups from under-sized
-jitter, which is flatly undefined for a t-test (`scipy.stats.ttest_ind`
-degenerated to `t=inf` with a precision-loss warning; see `TODO.md`).
-Mann-Whitney is rank-based and needs neither assumption, so the same test
-applies validly to both rows. U=10000 and U=0 both mean *complete*
-separation — every one of the 100 healthy windows' values beat every one of
-the 100 worn windows', in each metric's respective direction.
+I used Mann-Whitney U instead of a t-test because peak frequency is
+bin-quantized — it clusters at a handful of discrete FFT bins rather than
+varying continuously, which breaks a t-test's normality assumption even
+with genuine variance present. (An earlier version of the generator had
+essentially zero variance in both groups, a more severe case of the same
+issue: `scipy.stats.ttest_ind` degenerated to `t=inf` with a precision-loss
+warning.) Mann-Whitney is rank-based and doesn't need that assumption, so
+it's the one test valid for both rows here. U=10000 and U=0 both mean
+complete separation: every one of the 100 healthy windows beat every one of
+the 100 worn windows, on each metric.
 
 Regenerate with `pip install -r analysis/requirements.txt && python3
 analysis/generate_figures.py`.
@@ -56,14 +59,14 @@ analysis/generate_figures.py`.
 ## Fault classification
 
 A first pass at actually calling a window healthy or worn, not just
-computing its spectrum — `analysis/classify_faults.py`. Deliberately the
-simplest option in README §4's own staged progression (threshold on one
-feature, before reaching for anomaly detection or a trained model): sum the
-FFT amplitude in a band around the belt-pass frequency, compare it to a
-baseline (mean + 3 standard deviations) fit on 70% of the healthy device's
-windows, held out the other 30% for evaluation. Baseline and every
-prediction are persisted (`baselines` / `classifications` tables in
-`backend/storage.py`), not just printed.
+computing its spectrum: `analysis/classify_faults.py`. It's deliberately
+the simplest thing that could work, well short of anomaly detection or a
+trained model — sum the FFT amplitude in a band around the belt-pass
+frequency and compare it to a baseline (mean + 3 standard deviations) fit
+on 70% of the healthy device's windows. The other 30% is held out for
+evaluation. The baseline and every prediction get persisted to the
+`baselines` / `classifications` tables in `backend/storage.py`, not just
+printed to the console.
 
 ![Threshold classification: belt-pass band amplitude vs. baseline](analysis/figures/classification.png)
 
@@ -72,15 +75,13 @@ prediction are persisted (`baselines` / `classifications` tables in
 | **True healthy** | 30 | 0 |
 | **True worn** | 0 | 100 |
 
-Accuracy 100%, on the 130 windows never used to set the threshold (30
-held-out healthy + 100 worn) — but read that number for what it is, not
-more: **evaluated only against the same hand-picked synthetic model used
-everywhere else on this page.** It shows the threshold approach is sound
-*given* that model, not that it will work on a real belt, which may not
-separate this cleanly, may drift with load or speed, or may show wear as a
-different feature entirely. Real hardware data is what turns this from "a
-reasonable first classifier" into a validated one — see
-[Status](#status) and `TODO.md`.
+100% accuracy on the 130 windows never used to set the threshold. That
+number only says the threshold works given this exact synthetic model,
+though — it doesn't say anything about a real belt, which might not
+separate this cleanly, might drift with load or speed, or might show wear
+through a completely different feature. Real hardware data is what turns
+this from "a reasonable first classifier" into a validated one (see
+[Status](#status)).
 
 Regenerate with `python3 analysis/classify_faults.py`.
 
@@ -99,9 +100,9 @@ flowchart LR
     Classify -->|baselines,<br/>classifications| DB
 ```
 
-Ingestion and analysis are deliberately two separate processes talking only
-through the database, not through MQTT or a shared queue — see
-[Design decisions](#design-decisions).
+Ingestion and analysis are two separate processes that only ever talk
+through the database — no MQTT, no shared queue between them. More on why
+below.
 
 ## Repo layout
 
@@ -110,64 +111,62 @@ main/            ESP-IDF firmware: fixed-rate sampling, windowing, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        Notebook, static report figures, and the threshold classifier
-TODO.md          Working engineering log: open items, decisions, rationale
 ```
 
 ## Design decisions
 
-A few choices here aren't the first thing you'd reach for, so it's worth
-saying why.
+A few choices here aren't the obvious first pick, so they're worth
+explaining.
 
 **Sampling is timer-driven, not delay-driven, and double-buffered.**
-A naive `vTaskDelay`-based sample loop looks fine until you check the
-numbers: this board's FreeRTOS tick is 100Hz (10ms resolution), which would
-round a 500Hz/2ms sample period down to zero ticks and sample uncontrolled.
-Firmware instead uses `esp_timer` — backed by hardware, independent of the
-FreeRTOS tick — to fire a minimal read-and-store callback at a fixed rate,
-alternating between two window buffers. The slower part (JSON serialization,
-network publish) runs in a separate task, so a stalled MQTT publish never
+A naive `vTaskDelay` loop looks fine until you check the numbers: this
+board's FreeRTOS tick runs at 100Hz (10ms resolution), which rounds a
+500Hz/2ms sample period down to zero ticks and samples uncontrolled.
+So the firmware uses `esp_timer` instead — hardware-backed, independent of
+the FreeRTOS tick — to fire a minimal read-and-store callback at a fixed
+rate, alternating between two window buffers. JSON serialization and the
+network publish run in a separate task, so a stalled MQTT publish never
 delays the next sample.
 
-**Ingestion and analysis are separate processes, not one pipeline.**
-`ingest.py` does exactly one thing: validate an incoming window and write it
-to SQLite. `analyze_fft.py` is a standalone script with no MQTT client at
-all — it polls the database for windows without a matching result, computes
-the spectrum, and writes it back. Failure in one never blocks the other, and
-re-running analysis is safe by construction (it skips windows already
-analyzed) rather than by convention.
+**Ingestion and analysis run as separate processes.** `ingest.py` does one
+thing: validate an incoming window and write it to SQLite. `analyze_fft.py`
+has no MQTT client at all — it's a standalone script that polls the
+database for windows without a matching result, computes the spectrum, and
+writes it back. A failure in one never blocks the other, and re-running
+analysis is safe because it skips windows it's already processed, not
+because you have to remember to be careful with it.
 
-**SQLite, not Postgres.** Single writer at a time, one row per window, no
-daemon competing with the MQTT broker for a Raspberry Pi's resources.
-WAL mode is enabled so notebooks can read the file while a writer is still
-appending. Two tables — `raw_windows` and `fft_results`, linked by
-`window_id` — so raw data and derived spectra are kept separately and
-neither is ever overwritten by the other.
+**SQLite over Postgres.** One writer at a time, one row per window, no
+daemon competing with the MQTT broker for a Raspberry Pi's limited
+resources. WAL mode is on so notebooks can read the file while a writer is
+still appending. Two tables — `raw_windows` and `fft_results`, linked by
+`window_id` — keep raw data and derived spectra separate, so neither ever
+overwrites the other.
 
-**QoS and session state are matched end-to-end, not just set once.**
-MQTT's effective delivery guarantee is `min(publish QoS, subscribe QoS)`, so
-publishing at QoS 1 does nothing if the subscriber listens at QoS 0 — an
-easy mismatch to introduce without noticing, since nothing errors. The
-ingestion client subscribes at QoS 1 with a stable `client_id` and
-`clean_session=False`, so the broker holds messages published while it's
-offline instead of silently dropping them.
+**QoS and session state are matched end to end.** MQTT's effective delivery
+guarantee is `min(publish QoS, subscribe QoS)`, so publishing at QoS 1 buys
+you nothing if the subscriber is listening at QoS 0 — an easy mismatch to
+introduce, since nothing errors when it happens. The ingestion client
+subscribes at QoS 1 with a stable `client_id` and `clean_session=False`, so
+the broker holds onto messages published while it's offline instead of
+dropping them.
 
-**The classifier is a threshold, not a trained model — deliberately.** With
-only synthetic "worn" data (a hand-picked signal model, not an observed real
-belt), a fancier classifier — isolation forest, a supervised model — would
-fit that assumption just as confidently as a threshold does, just less
-visibly: a black-box model's weights don't tell you they're wrong until they
-are. A threshold on one physically-meaningful feature (belt-pass band
-amplitude vs. a stored baseline) is inspectable, and recalibrating it once
-real data exists is a number change, not a retrain.
+**The classifier is a threshold, not a trained model.** That's deliberate.
+With only synthetic "worn" data — a hand-picked signal model, not an
+observed real belt — a fancier classifier would fit that assumption just
+as confidently as a threshold does, just less visibly: a black-box model's
+weights don't announce that they're wrong. A threshold on one physically
+meaningful feature is inspectable, and recalibrating it once real data
+exists is a number change, not a retrain.
 
-**The network is a phone hotspot, on purpose.** The primary WiFi network
-here enforces WPA3-only auth, which this board's (original ESP32) software WPA3
-implementation doesn't reliably negotiate. Early testing also hit
-connection failures against a public MQTT broker over that hotspot — turned
-out to be the carrier's traffic shaping dropping plain, non-standard-port
-TCP, not the broker. Running the broker locally on the same hotspot network
-keeps traffic from ever crossing onto the carrier's WAN, sidestepping both
-problems without touching the router config.
+**The network is a phone hotspot, on purpose.** The primary WiFi here
+enforces WPA3-only auth, and this board's (an original ESP32) WPA3 support
+doesn't reliably negotiate it. Early testing also hit connection failures
+against a public MQTT broker over that hotspot, which turned out to be the
+carrier's traffic shaping dropping plain, non-standard-port TCP rather than
+anything wrong with the broker itself. Running the broker locally on the
+same hotspot network keeps traffic off the carrier's WAN entirely, which
+sidesteps both problems without touching router config I don't control.
 
 ## Status
 
@@ -181,7 +180,7 @@ problems without touching the router config.
 | Spectrum exploration notebook | Implemented, executes cleanly against the real schema |
 | Static report figures (`generate_figures.py`) | Implemented, run against the real database — see [Analysis results](#analysis-results) |
 | Threshold fault classifier (`classify_faults.py`) | Implemented, 100% accuracy on held-out synthetic data — see [Fault classification](#fault-classification). **Not validated against a real belt** |
-| Statistical anomaly detection / supervised classification | Not started — README §4's steps 2–3, only worth reaching for if the threshold approach proves too brittle on real data |
+| Statistical anomaly detection / supervised classification | Not started — the natural next step after the threshold classifier, worth doing only if it proves too brittle on real data |
 
 ## Getting started
 
@@ -204,12 +203,11 @@ figures under [Analysis results](#analysis-results).
 
 ## Roadmap
 
-Tracked in detail in [`TODO.md`](TODO.md); the near-term path is: stand up
-the local broker → validate the firmware on real hardware → run a capture
-session to pick a sample rate against the conveyor's actual mechanical
-frequencies (currently a 500Hz placeholder) → capture a known-healthy
-baseline spectrum from the real belt → re-fit and re-evaluate
-`classify_faults.py`'s threshold against that real data, not the synthetic
-model it's only ever seen → only then consider README §4's steps 2–3
-(statistical anomaly detection, supervised classification) if the threshold
+Stand up the local broker → validate the firmware on real hardware → run a
+capture session to pick a sample rate against the conveyor's actual
+mechanical frequencies (500Hz is a placeholder right now) → capture a
+known-healthy baseline from the real belt → re-fit and re-evaluate
+`classify_faults.py`'s threshold against that real data instead of the
+synthetic model it's only ever seen. Anomaly detection or a supervised
+model are only worth reaching for after that, and only if the threshold
 turns out to be too brittle in practice.
