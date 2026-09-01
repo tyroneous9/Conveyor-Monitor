@@ -4,6 +4,8 @@ Predictive maintenance for an industrial conveyor belt: an ESP32 samples
 vibration off an MPU6050 accelerometer, streams it over MQTT to a
 Raspberry Pi, and analyzes this data using FFT to predict belt wear.
 
+![Physical setup](analysis/figures/physical_setup.png)
+
 ## Analysis results
 
 Output from `backend/analyze_fft.py` on 700 captures (350 healthy and 350
