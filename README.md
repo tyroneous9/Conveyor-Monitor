@@ -131,8 +131,8 @@ just the one pair of examples I happened to pick for the plots above:
 
 | Metric | Healthy (n=350) | Worn (n=350) | Mann-Whitney U |
 |---|---|---|---|
-| Peak frequency (Hz) | 28.04 ± 4.35 | 9.01 ± 4.57 | U=116793, p=1.93×10⁻¹¹⁰ |
-| Peak amplitude (g) | 3.88 ± 1.13 | 22.17 ± 7.93 | U=6149, p=2.88×10⁻⁹⁴ |
+| Peak frequency (Hz) | 28.49 ± 4.59 | 8.74 ± 3.98 | U=117736, p=2.10×10⁻¹¹³ |
+| Peak amplitude (g) | 2.19 ± 0.62 | 18.97 ± 6.15 | U=1482, p=1.43×10⁻¹¹⁰ |
 
 I had to look up "Mann-Whitney U" myself: it's a statistical test for
 whether two groups of numbers are actually different or just randomly
@@ -173,13 +173,13 @@ tables, not just printed to the console.
 
 | | Predicted healthy | Predicted worn |
 |---|---|---|
-| **True healthy** | 101 | 5 |
-| **True worn** | 27 | 323 |
+| **True healthy** | 100 | 6 |
+| **True worn** | 17 | 333 |
 
-93.0% accuracy on the 456 held-out captures: 98.5% precision, meaning
-when it says worn it's almost always right, and 92.3% recall, meaning it
+95.0% accuracy on the 456 held-out captures: 98.2% precision, meaning
+when it says worn it's almost always right, and 95.1% recall, meaning it
 catches most but not all of the actually-worn captures. It throws a
-handful of false alarms on healthy captures, and misses about 8% of worn
+handful of false alarms on healthy captures, and misses about 5% of worn
 ones, mostly early-stage wear that hadn't pushed the belt-pass amplitude
 far enough above baseline yet. That's a reasonable failure mode for
 something this simple, and I want to be upfront about it: this is one

@@ -1,10 +1,10 @@
-Ground truth: device `esp32-dev-test`, healthy range(s) [1787958507, 1787965489], worn range(s) [1788131307, 1788138289] (operator-recorded capture sessions).
+Ground truth: device `esp32-dev-test`, healthy range(s) [1788328030, 1788348971], worn range(s) [1788371231, 1788392172] (operator-recorded capture sessions).
 
-Threshold: `belt_band_amplitude` > 9.573 (baseline 2.608 + 3×2.322 std)
+Threshold: `belt_band_amplitude` > 5.916 (baseline 1.658 + 3×1.419 std)
 
 | | Predicted healthy | Predicted worn |
 |---|---|---|
-| **True healthy** | 101 | 5 |
-| **True worn** | 27 | 323 |
+| **True healthy** | 100 | 6 |
+| **True worn** | 17 | 333 |
 
-Accuracy: 93.0% · Precision: 98.5% · Recall: 92.3% (n=456)
+Accuracy: 95.0% · Precision: 98.2% · Recall: 95.1% (n=456)
