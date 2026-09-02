@@ -6,7 +6,7 @@ Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibrati
 
 ## Hardware
 
-**ESP32:** built-in WiFi, well documented and supported with a vendor framework (ESPIDF), available as both a dev board (used here) and a bare chip for eventual production use, and cheap in bulk.
+**ESP32:** built-in WiFi, well documented and supported with a vendor framework (ESP-IDF), available as both a dev board (used here) and a bare chip for eventual production use, and cheap in bulk.
 
 **MPU6050:** the ESP32 has mature I2C drivers for it and the documentation shows how to use it directly, its sample rate is adequate for the target vibration frequencies, and it's cheap.
 
@@ -29,7 +29,7 @@ flowchart LR
     Classify -->|baselines,<br/>classifications| DB
 ```
 
-Explanation
+**Explanation:**
 
 1. The MPU6050 measures vibration along three axes (x, y, z) which is sampled by the ESP32 at an exact 500Hz using a hardware timer (esp_timer). Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
 
@@ -95,11 +95,12 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 **1. Sampling uses a hardware timer and double buffer:**
 The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution, which rounds a 500Hz sample period down to zero ticks and samples completely uncontrolled.
 
-I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate. 
+I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate.
 
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
-**2. Locally hosted broker:** My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
+**2. Locally hosted broker:**
+My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
 **3. SQLite:**
 Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
@@ -114,7 +115,7 @@ The window size of 256 samples is specifically chosen for two reasons. First, th
 ## Current issues
 
 **1. Classification limitations:**
-A single window being classified as worn doesn't guarantee the belt is worn. It could've happened by chance or it may be a temporary fault. It is much more useful to see if there is a trend of worn windows which can be used to make more confident statements about belt wear. 
+A single window being classified as worn doesn't guarantee the belt is worn. It could've happened by chance or it may be a temporary fault. It is much more useful to see if there is a trend of worn windows which can be used to make more confident statements about belt wear.
 
 Another concern is that belt is unlikely to be the only fault in the conveyor belt. Belt wear was specifically investigated in this project only because it is audibly obvious and is easily fixed after diagnosis. Other faults may have not caused down time so far, but it is a possibility in the future.
 
