@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""MQTT ingestion for the Pi: writes raw accelerometer captures to SQLite.
+"""MQTT ingestion for the Pi: writes raw accelerometer windows to SQLite.
 
 Subscribes to sensors/<device_id>/vibration/raw. Each message is one
-fixed-rate sample capture from the ESP32, as JSON:
+fixed-rate sample window from the ESP32, as JSON:
 
     {"sample_rate_hz": 500, "ax": [...], "ay": [...], "az": [...]}
 
-(equal-length per-axis arrays). Each capture is stored as-is in the
-raw_captures table (see storage.py) -- nothing else happens here. FFT
+(equal-length per-axis arrays). Each window is stored as-is in the
+raw_windows table (see storage.py) -- nothing else happens here. FFT
 analysis is a separate, on-demand script (analyze_fft.py) that reads from
 this same database; keeping the two apart means ingestion never blocks on
 (or fails because of) analysis, and analysis can be re-run against history
@@ -58,7 +58,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     log.info("connected to %s:%d as %s (reason=%s)", BROKER_HOST, BROKER_PORT, CLIENT_ID, reason_code)
     # QoS 1 to match the firmware's publish QoS -- effective delivery is
     # min(publish qos, subscribe qos), so subscribing at 0 would silently
-    # downgrade every capture to at-most-once regardless of what the ESP32
+    # downgrade every window to at-most-once regardless of what the ESP32
     # sends. Combined with clean_session=False below, the broker holds
     # QoS>=1 messages published while this client is offline and redelivers
     # them on reconnect instead of dropping them.
@@ -76,17 +76,17 @@ def on_message(client, userdata, msg):
         payload = json.loads(msg.payload)
         validate_payload(payload)
     except (ValueError, KeyError, json.JSONDecodeError) as exc:
-        log.warning("bad capture from %s: %s", device_id, exc)
+        log.warning("bad window from %s: %s", device_id, exc)
         return
 
     conn = userdata
     try:
-        capture_id = storage.store_capture(conn, device_id, payload)
+        window_id = storage.store_window(conn, device_id, payload)
     except sqlite3.Error as exc:
-        log.warning("failed to store capture from %s: %s", device_id, exc)
+        log.warning("failed to store window from %s: %s", device_id, exc)
         return
 
-    log.info("device=%s stored capture_id=%d n=%d", device_id, capture_id, len(payload["ax"]))
+    log.info("device=%s stored window_id=%d n=%d", device_id, window_id, len(payload["ax"]))
 
 
 def main():
