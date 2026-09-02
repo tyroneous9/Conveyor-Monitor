@@ -6,9 +6,9 @@
  *   2. Connects to a plain (non-TLS) MQTT broker
  *   3. Samples the MPU6050 accelerometer at a fixed rate (esp_timer, not the
  *      FreeRTOS tick -- see the comment on s_sample_timer) into a small pool
- *      of capture buffers, handed off to a separate publish task over a pair
+ *      of window buffers, handed off to a separate publish task over a pair
  *      of FreeRTOS queues (see the comment on s_free_queue), which publishes
- *      each full capture as one JSON message to
+ *      each full window as one JSON message to
  *      sensors/<device_id>/vibration/raw. See backend/ingest.py for the
  *      consumer side of this exact contract.
  */
@@ -35,18 +35,18 @@
 static const char *TAG = "conveyor_monitor";
 
 #define SAMPLE_RATE_HZ CONFIG_SAMPLE_RATE_HZ
-#define CAPTURE_SIZE CONFIG_SAMPLE_CAPTURE_SIZE
+#define WINDOW_SIZE CONFIG_SAMPLE_WINDOW_SIZE
 
 /* Generous per-value budget (sign, 4 decimals, comma) so this always fits
- * whatever CAPTURE_SIZE is configured to, instead of a fixed guess that could
- * silently become too small if CAPTURE_SIZE changes. */
-#define JSON_BUFFER_SIZE (CAPTURE_SIZE * 3 * 20 + 128)
+ * whatever WINDOW_SIZE is configured to, instead of a fixed guess that could
+ * silently become too small if WINDOW_SIZE changes. */
+#define JSON_BUFFER_SIZE (WINDOW_SIZE * 3 * 20 + 128)
 
 typedef struct {
-    float ax[CAPTURE_SIZE];
-    float ay[CAPTURE_SIZE];
-    float az[CAPTURE_SIZE];
-} sample_capture_t;
+    float ax[WINDOW_SIZE];
+    float ay[WINDOW_SIZE];
+    float az[WINDOW_SIZE];
+} sample_window_t;
 
 static esp_mqtt_client_handle_t s_mqtt_client;
 static volatile bool s_mqtt_connected;
@@ -55,19 +55,19 @@ static char s_device_topic[64];
 static esp_timer_handle_t s_sample_timer;
 static char s_json_buf[JSON_BUFFER_SIZE];
 
-/* A CAPTURE_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
+/* A WINDOW_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
  * queues, so a slow MQTT publish (network I/O, in publish_task) never blocks
  * or delays the next sample due (in sample_timer_cb):
  *   - s_free_queue holds indices of buffers safe to fill. sample_timer_cb
  *     checks one out to fill and, once full, hands its index to
  *     s_ready_queue.
- *   - publish_task blocks on s_ready_queue, publishes the capture, then
+ *   - publish_task blocks on s_ready_queue, publishes the window, then
  *     returns the index to s_free_queue.
  * If s_free_queue is ever empty, publish_task has fallen behind by a full
- * capture -- sample_timer_cb drops the sample and logs it rather than
+ * window -- sample_timer_cb drops the sample and logs it rather than
  * overwriting a buffer publish_task might still be reading. */
-#define CAPTURE_QUEUE_DEPTH 2
-static sample_capture_t s_captures[CAPTURE_QUEUE_DEPTH];
+#define WINDOW_QUEUE_DEPTH 2
+static sample_window_t s_windows[WINDOW_QUEUE_DEPTH];
 static QueueHandle_t s_free_queue;
 static QueueHandle_t s_ready_queue;
 
@@ -98,8 +98,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 }
 
 /* Bounds how much a network drop can queue up in the client's outbox before
- * captures start getting dropped -- enough to ride out a ~10s hotspot hiccup
- * at the default sample rate/capture size without growing unbounded on a
+ * windows start getting dropped -- enough to ride out a ~10s hotspot hiccup
+ * at the default sample rate/window size without growing unbounded on a
  * memory-constrained device. */
 #define OUTBOX_LIMIT_BYTES (JSON_BUFFER_SIZE * 8)
 
@@ -109,7 +109,7 @@ static void mqtt_app_start(void)
         .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
         /* Default buffer is sized for small example payloads, not a whole
-         * JSON sample capture -- match it to what we actually send. */
+         * JSON sample window -- match it to what we actually send. */
         .buffer.size = JSON_BUFFER_SIZE,
         /* Default is 120s; the network here is a phone hotspot, which can
          * idle-timeout/drop the radio to save battery -- keep traffic
@@ -163,15 +163,15 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
     return true;
 }
 
-static bool build_capture_json(const sample_capture_t *cap, char *buf, size_t buf_size, size_t *out_len)
+static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_size, size_t *out_len)
 {
     size_t offset = 0;
     APPEND("{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
-    if (!append_float_array(buf, buf_size, &offset, "ax", cap->ax, CAPTURE_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "ax", win->ax, WINDOW_SIZE)) return false;
     APPEND(",");
-    if (!append_float_array(buf, buf_size, &offset, "ay", cap->ay, CAPTURE_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "ay", win->ay, WINDOW_SIZE)) return false;
     APPEND(",");
-    if (!append_float_array(buf, buf_size, &offset, "az", cap->az, CAPTURE_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "az", win->az, WINDOW_SIZE)) return false;
     APPEND("}");
     *out_len = offset;
     return true;
@@ -190,8 +190,8 @@ static void publish_task(void *arg)
         }
 
         size_t len;
-        if (!build_capture_json(&s_captures[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
-            ESP_LOGE(TAG, "Capture JSON exceeded %d-byte buffer, dropping capture", JSON_BUFFER_SIZE);
+        if (!build_window_json(&s_windows[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
+            ESP_LOGE(TAG, "Window JSON exceeded %d-byte buffer, dropping window", JSON_BUFFER_SIZE);
             xQueueSend(s_free_queue, &ready_buf, 0);
             continue;
         }
@@ -199,15 +199,15 @@ static void publish_task(void *arg)
         /* Publish unconditionally, even while s_mqtt_connected is false: at
          * QoS 1 the client queues into its outbox (bounded by
          * OUTBOX_LIMIT_BYTES above) and flushes it on reconnect, so a brief
-         * drop no longer means a silently lost capture. */
+         * drop no longer means a silently lost window. */
         int msg_id = esp_mqtt_client_publish(s_mqtt_client, s_device_topic, s_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
         if (msg_id == -2) {
-            ESP_LOGW(TAG, "Outbox full, dropping capture (broker unreachable too long)");
+            ESP_LOGW(TAG, "Outbox full, dropping window (broker unreachable too long)");
         } else if (!s_mqtt_connected) {
-            ESP_LOGI(TAG, "Queued %d-sample capture for %s while disconnected (outbox=%d bytes)",
-                     CAPTURE_SIZE, s_device_topic, esp_mqtt_client_get_outbox_size(s_mqtt_client));
+            ESP_LOGI(TAG, "Queued %d-sample window for %s while disconnected (outbox=%d bytes)",
+                     WINDOW_SIZE, s_device_topic, esp_mqtt_client_get_outbox_size(s_mqtt_client));
         } else {
-            ESP_LOGI(TAG, "Published %d-sample capture to %s (%d bytes)", CAPTURE_SIZE, s_device_topic, (int)len);
+            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
         }
 
         xQueueSend(s_free_queue, &ready_buf, 0);
@@ -222,7 +222,7 @@ static void publish_task(void *arg)
 static void sample_timer_cb(void *arg)
 {
     (void)arg;
-    /* Which pool buffer this capture is filling, or -1 between captures.
+    /* Which pool buffer this window is filling, or -1 between windows.
      * Static: this callback only ever runs from the single esp_timer task,
      * one invocation at a time, so there's no concurrent access to guard
      * against. */
@@ -231,7 +231,7 @@ static void sample_timer_cb(void *arg)
 
     if (s_active_buf < 0) {
         if (xQueueReceive(s_free_queue, &s_active_buf, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free capture buffer)");
+            ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
             return;
         }
         s_fill_index = 0;
@@ -244,13 +244,13 @@ static void sample_timer_cb(void *arg)
         return;
     }
 
-    sample_capture_t *buf = &s_captures[s_active_buf];
+    sample_window_t *buf = &s_windows[s_active_buf];
     buf->ax[s_fill_index] = accel.accel_x;
     buf->ay[s_fill_index] = accel.accel_y;
     buf->az[s_fill_index] = accel.accel_z;
     s_fill_index++;
 
-    if (s_fill_index >= CAPTURE_SIZE) {
+    if (s_fill_index >= WINDOW_SIZE) {
         xQueueSend(s_ready_queue, &s_active_buf, 0);
         s_active_buf = -1;
     }
@@ -278,10 +278,10 @@ void app_main(void)
 
     mqtt_app_start();
 
-    s_free_queue = xQueueCreate(CAPTURE_QUEUE_DEPTH, sizeof(int));
-    s_ready_queue = xQueueCreate(CAPTURE_QUEUE_DEPTH, sizeof(int));
+    s_free_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
+    s_ready_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     configASSERT(s_free_queue != NULL && s_ready_queue != NULL);
-    for (int i = 0; i < CAPTURE_QUEUE_DEPTH; i++) {
+    for (int i = 0; i < WINDOW_QUEUE_DEPTH; i++) {
         xQueueSend(s_free_queue, &i, 0);
     }
 

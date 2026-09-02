@@ -7,8 +7,8 @@ analysis/figures/. Nothing here is interactive: matplotlib for the plots,
 scipy.stats for a real significance test on the healthy/worn separation,
 output committed as static images for the README.
 
-Healthy vs. worn captures come from one device_id, split by which
---healthy-range / --worn-range a capture's capture timestamp falls in (see
+Healthy vs. worn windows come from one device_id, split by which
+--healthy-range / --worn-range a window's timestamp falls in (see
 analysis/labels.py) -- device_id itself doesn't encode belt condition.
 
 Usage:
@@ -43,12 +43,12 @@ HEALTHY_COLOR = "#2a78d6"
 WORN_COLOR = "#d03b3b"
 
 
-def fetch_capture(conn, device_id, ranges):
-    """First capture for device_id inside any of `ranges`, raw + spectrum, joined."""
+def fetch_window(conn, device_id, ranges):
+    """First window for device_id inside any of `ranges`, raw + spectrum, joined."""
     for start, end in ranges:
         row = conn.execute(
             "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
-            "FROM raw_captures r JOIN fft_results f ON f.capture_id = r.id "
+            "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
             "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id LIMIT 1",
             (device_id, start, end),
         ).fetchone()
@@ -61,14 +61,14 @@ def fetch_capture(conn, device_id, ranges):
                 "peak_freq_hz": row[4],
                 "peak_amp": row[5],
             }
-    raise SystemExit(f"no captures found for device_id={device_id!r} in the given range(s)")
+    raise SystemExit(f"no windows found for device_id={device_id!r} in the given range(s)")
 
 
 def fetch_series(conn, device_id, ranges):
     peak_freq, peak_amp = [], []
     for start, end in ranges:
         rows = conn.execute(
-            "SELECT f.peak_freq_hz, f.peak_amp FROM raw_captures r JOIN fft_results f ON f.capture_id = r.id "
+            "SELECT f.peak_freq_hz, f.peak_amp FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
             "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id",
             (device_id, start, end),
         ).fetchall()
@@ -141,14 +141,14 @@ def plot_repeatability(h_freq, h_amp, w_freq, w_amp, out_path):
     axes[0].scatter(n, h_freq, color=HEALTHY_COLOR, s=28, label="Healthy")
     axes[0].scatter(np.arange(1, len(w_freq) + 1), w_freq, color=WORN_COLOR, s=28, label="Worn")
     axes[0].set_title("Peak frequency")
-    axes[0].set_xlabel("capture #")
+    axes[0].set_xlabel("window #")
     axes[0].set_ylabel("Hz")
     axes[0].legend(frameon=False)
 
     axes[1].scatter(n, h_amp, color=HEALTHY_COLOR, s=28, label="Healthy")
     axes[1].scatter(np.arange(1, len(w_amp) + 1), w_amp, color=WORN_COLOR, s=28, label="Worn")
     axes[1].set_title("Peak amplitude")
-    axes[1].set_xlabel("capture #")
+    axes[1].set_xlabel("window #")
     axes[1].set_ylabel("g")
     axes[1].legend(frameon=False)
 
@@ -156,7 +156,7 @@ def plot_repeatability(h_freq, h_amp, w_freq, w_amp, out_path):
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", color="#e1e0d9", lw=0.8)
         ax.set_axisbelow(True)
-    fig.suptitle("Repeatability across independent captures", y=1.02)
+    fig.suptitle("Repeatability across independent windows", y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -167,7 +167,7 @@ def describe_test(healthy, worn, decimals):
     means relative to within-group variance, which is undefined when that
     variance is zero -- exactly what happens here, since peak frequency is
     quantized to an FFT bin and this dataset's jitter isn't enough to move
-    any capture to a different bin (scipy.stats.ttest_ind degenerates to
+    any window to a different bin (scipy.stats.ttest_ind degenerates to
     t=inf with a precision-loss warning on this data -- confirmed, not
     hypothetical). Mann-Whitney is rank-based, needs no variance assumption,
     and is valid for both the degenerate (frequency) and continuous
@@ -210,13 +210,13 @@ def main():
     if not worn_ranges:
         raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
 
-    h_capture = fetch_capture(conn, device_id, healthy_ranges)
-    w_capture = fetch_capture(conn, device_id, worn_ranges)
+    h_window = fetch_window(conn, device_id, healthy_ranges)
+    w_window = fetch_window(conn, device_id, worn_ranges)
     h_freq, h_amp = fetch_series(conn, device_id, healthy_ranges)
     w_freq, w_amp = fetch_series(conn, device_id, worn_ranges)
 
-    plot_spectrum(h_capture, w_capture, os.path.join(FIG_DIR, "spectrum_comparison.png"))
-    plot_waveform(h_capture, w_capture, os.path.join(FIG_DIR, "waveform_comparison.png"))
+    plot_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_comparison.png"))
+    plot_waveform(h_window, w_window, os.path.join(FIG_DIR, "waveform_comparison.png"))
     plot_repeatability(h_freq, h_amp, w_freq, w_amp, os.path.join(FIG_DIR, "repeatability.png"))
     table_lines = write_summary_table(h_freq, h_amp, w_freq, w_amp, os.path.join(FIG_DIR, "summary_table.md"))
 
