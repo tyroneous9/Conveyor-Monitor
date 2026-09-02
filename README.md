@@ -39,8 +39,6 @@ A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 ta
 
 A window is a batch of 256 consecutive samples (~0.512 seconds), bundled together and sent as one JSON/MQTT message.
 
-The backend exclusively uses windows rather than samples: the `raw_windows` table, FFT analysis, and fault classification.
-
 ## Repo layout
 
 ```
@@ -94,16 +92,20 @@ I replaced the delay with `esp_timer`, a hardware timer independent of the FreeR
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
 **2. MQTT configuration:** 
-MQTT can be configured via QoS (Quality of Service) to try to guarantee delivery of messages: The back end subscribes at QoS 1, meaning it retries until acknowledged. This makes the broker hold onto published messages if the Pi or ESP32 go offline instead of dropping them.
-
 
 
 **3. Locally hosted broker:** My primary WiFi enforces
 WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
 **4. SQLite:**
-
 Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
+
+**4. Windows instead of samples:**
+By allowing the ESP32 to collect samples locally into a window first, this guarantees that any single window is a consecutive set of samples. A window in progress can never be truncated or corrupted by network drops, only by hardware issues.
+
+MQTT can be configured via QoS (Quality of Service) to try to guarantee delivery of messages. In the case of a network drop, MQTT will keep retrying delivery, while windows that haven't been read yet will be enqueued into an outbox which can store up to 8 windows, all of which can be read once network is restored.
+
+The window size of 256 samples is specifically chosen for two reasons. First, there is a reasonable amount of time between each window (~0.512 seconds), which means that the 8 window outbox allows for approximately 4.1 seconds of network downtime before windows get dropped, causing data corruption. In practice, this worst case only happens if there is a serious outage in which case testing should be done some other time. Small, infrequent network drops are the main target of this protection time.
 
 ## Current issues
 
