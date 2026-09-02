@@ -21,7 +21,7 @@ flowchart LR
 
 Explanation
 
-1. The MPU6050 measures vibration along three axes (x, y, z) which is sampled by the ESP32 at an exact 500Hz using a hardware timer (esp_timer). These samples are published as JSON to Mosquitto, a MQTT broker.
+1. The MPU6050 measures vibration along three axes (x, y, z) which is sampled by the ESP32 at an exact 500Hz using a hardware timer (esp_timer). Samples are batched into captures, which are published as JSON to Mosquitto, a MQTT broker.
 
 2. A Raspberry Pi hosts the broker locally, and it also reads the vibration data via `ingest.py` which subscribes to the published topic.
 
@@ -32,6 +32,14 @@ Explanation
 6. `classify_faults.py` reads the FFT results and classifies any new capture healthy or worn by comparing the vibration against a baseline from known-healthy captures. Results get saved to the database (`baselines` and `classifications` tables).
 
 7. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data by hand.
+
+### Sample vs. capture
+
+A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 takes one every 2ms (500Hz).
+
+A capture is a batch of 256 consecutive samples (~0.512 seconds), bundled together and sent as one JSON/MQTT message.
+
+The backend exclusively uses captures rather than samples: the `raw_captures` table, FFT analysis, and fault classification.
 
 ## Repo layout
 
@@ -83,10 +91,12 @@ The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but
 
 I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate. 
 
-Additionally, samples are stored by queuing up in two capture buffers. While one buffer is being filled with new samples, the other buffer (which already has a sample) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
+Additionally, samples are stored by queuing up in two capture buffers. While one buffer is being filled with new samples, the other buffer (which already has a full capture) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
 **2. MQTT configuration:** 
-MQTT's QoS (Quality of Service) setting controls how hard it tries to guarantee delivery: The back end subscribes at QoS 1, meaning it retries until acknowledged. This makes the broker hold onto published messages if the Pi or ESP32 go offline instead of dropping them.
+MQTT can be configured via QoS (Quality of Service) to try to guarantee delivery of messages: The back end subscribes at QoS 1, meaning it retries until acknowledged. This makes the broker hold onto published messages if the Pi or ESP32 go offline instead of dropping them.
+
+
 
 **3. Locally hosted broker:** My primary WiFi enforces
 WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
