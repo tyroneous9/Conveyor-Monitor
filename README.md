@@ -39,13 +39,13 @@ A window is a batch of 256 consecutive samples (~0.512 seconds), bundled togethe
 
 2. A Raspberry Pi hosts the broker locally, and it also reads the vibration data via `ingest.py` which subscribes to the published topic.
 
-4. `ingest.py` validates each window and writes it into a SQLite database in the `raw_windows` table.
+3. `ingest.py` validates each window and writes it into a SQLite database in the `raw_windows` table.
 
-5. `analyze_fft.py` is used to analyze the data given enough windows. It performs FFT and writes the results into `fft_results`.
+4. `analyze_fft.py` is used to analyze the data given enough windows. It performs FFT and writes the results into `fft_results`.
 
-6. `classify_faults.py` reads the FFT results and classifies any new window healthy or worn by comparing the vibration against a baseline from known-healthy windows. Results get saved to the database (`baselines` and `classifications` tables).
+5. `classify_faults.py` reads the FFT results and classifies any new window healthy or worn by comparing the vibration against a baseline from known-healthy windows. Results get saved to the database (`baselines` and `classifications` tables).
 
-7. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data manually.
+6. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data manually.
 
 ## Repo layout
 
@@ -99,8 +99,7 @@ I replaced the delay with `esp_timer`, a hardware timer independent of the FreeR
 
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
-**2. Locally hosted broker:** My primary WiFi enforces
-WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
+**2. Locally hosted broker:** My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
 **3. SQLite:**
 Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
