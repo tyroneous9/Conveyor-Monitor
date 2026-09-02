@@ -4,7 +4,17 @@ Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibrati
 
 ![Physical setup](analysis/figures/physical_setup.png)
 
-## How it works
+## Hardware
+
+**ESP32:** built-in WiFi, well documented and supported with a vendor framework (ESPIDF), available as both a dev board (used here) and a bare chip for eventual production use, and cheap in bulk.
+
+**MPU6050:** the ESP32 has mature I2C drivers for it and the documentation shows how to use it directly, its sample rate is adequate for the target vibration frequencies, and it's cheap.
+
+**Raspberry Pi 5:** acts as the central device that receives and stores data from every ESP32 on the line. In a production deployment this needs to be low-power and physically close to the sensors it's collecting from. In the production case, a cheaper device could be used, but the Pi 5 is what I already had.
+
+**Mounting:** the circuit is mounted to the conveyor's metal frame near the motor, attached by magnets and tape.
+
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -23,6 +33,10 @@ Explanation
 
 1. The MPU6050 measures vibration along three axes (x, y, z) which is sampled by the ESP32 at an exact 500Hz using a hardware timer (esp_timer). Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
 
+A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 takes one every 2ms (500Hz).
+
+A window is a batch of 256 consecutive samples (~0.512 seconds), bundled together and sent as one JSON/MQTT message.
+
 2. A Raspberry Pi hosts the broker locally, and it also reads the vibration data via `ingest.py` which subscribes to the published topic.
 
 4. `ingest.py` validates each window and writes it into a SQLite database in the `raw_windows` table.
@@ -31,13 +45,7 @@ Explanation
 
 6. `classify_faults.py` reads the FFT results and classifies any new window healthy or worn by comparing the vibration against a baseline from known-healthy windows. Results get saved to the database (`baselines` and `classifications` tables).
 
-7. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data by hand.
-
-### Sample vs. window
-
-A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 takes one every 2ms (500Hz).
-
-A window is a batch of 256 consecutive samples (~0.512 seconds), bundled together and sent as one JSON/MQTT message.
+7. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data manually.
 
 ## Repo layout
 
@@ -91,13 +99,10 @@ I replaced the delay with `esp_timer`, a hardware timer independent of the FreeR
 
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
-**2. MQTT configuration:** 
-
-
-**3. Locally hosted broker:** My primary WiFi enforces
+**2. Locally hosted broker:** My primary WiFi enforces
 WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
-**4. SQLite:**
+**3. SQLite:**
 Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
 
 **4. Windows instead of samples:**
@@ -109,8 +114,10 @@ The window size of 256 samples is specifically chosen for two reasons. First, th
 
 ## Current issues
 
-**1. Classification:**
+**1. Classification limitations:**
 A single window being classified as worn doesn't guarantee the belt is worn. It could've happened by chance or it may be a temporary fault. It is much more useful to see if there is a trend of worn windows which can be used to make more confident statements about belt wear. 
+
+Another concern is that belt is unlikely to be the only fault in the conveyor belt. Belt wear was specifically investigated in this project only because it is audibly obvious and is easily fixed after diagnosis. Other faults may have not caused down time so far, but it is a possibility in the future.
 
 **2. PCB migration:**
 The sensor circuit currently runs on a breadboard with an ESP32 dev board. This was good for prototyping, but installing it along multiple places along the conveyor belt is not cheap nor efficient. A PCB would be ideal to cut power use and make mounting more practical.
