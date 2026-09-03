@@ -18,15 +18,14 @@ Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibrati
 
 ```mermaid
 flowchart LR
-    MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware<br/>esp_timer @ 500Hz<br/>double-buffered windows"]
-    ESP -->|"MQTT, QoS 1<br/>JSON window"| Broker[["MQTT broker"]]
+    MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware"]
+    ESP -->|"publish window"| Broker["MQTT broker"]
     Broker --> Ingest["ingest.py"]
     Ingest -->|raw_windows| DB[("SQLite")]
     DB -->|unanalyzed windows| Analyze["analyze_fft.py"]
     Analyze -->|fft_results| DB
-    DB --> NB["analysis/*.ipynb"]
     DB -->|fft_results| Classify["classify_faults.py"]
-    Classify -->|baselines,<br/>classifications| DB
+    Classify -->|classifications| DB
 ```
 
 **Explanation:**
