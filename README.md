@@ -10,7 +10,7 @@ Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibrati
 
 **MPU6050:** the ESP32 has mature I2C drivers for it and the documentation shows how to use it directly, its sample rate is adequate for the target vibration frequencies, and it's cheap.
 
-**Raspberry Pi 5:** acts as the central device that receives and stores data from every ESP32 on the line. In a production deployment this needs to be low-power and physically close to the sensors it's collecting from. In the production case, a cheaper device could be used, but the Pi 5 is what I already had.
+**Raspberry Pi 5:** acts as the central device that receives and stores data from every ESP32 on the line. In production deployment this needs to be low-power and physically close to the sensors it's collecting from. A cheaper device could have been used, but the Pi 5 is what I already had.
 
 **Mounting:** the circuit is mounted to the conveyor's metal frame near the motor, attached by magnets and tape.
 
@@ -92,9 +92,9 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 ## Design decisions
 
 **1. Sampling uses a hardware timer and double buffer:**
-The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution, which rounds a 500Hz sample period down to zero ticks and samples completely uncontrolled.
+The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution. This means trying to sample at 500Hz (2ms) is impossible with such a delay, as it will be rounded up to 10ms minimum.
 
-I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate.
+I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate. It runs in a high priority FreeRTOS task, which functions similarly to an interrupt. The publish task can be interrupted by `esp_timer` at any time due to the priority difference.
 
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
