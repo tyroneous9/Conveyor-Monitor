@@ -40,6 +40,11 @@ log = logging.getLogger("analyze_fft")
 
 
 def compute_spectrum(sample_rate_hz, samples):
+    """One axis's time-domain samples -> (frequency bins, magnitude
+    spectrum). mean-subtract removes the DC offset (gravity) so it doesn't
+    dominate the FFT; the Hann window tapers the edges of the (non-periodic)
+    sample window to reduce spectral leakage; rfft exploits the input being
+    real-valued to skip the redundant negative-frequency half."""
     n = len(samples)
     windowed = (samples - np.mean(samples)) * np.hanning(n)
     spectrum = np.abs(np.fft.rfft(windowed))
@@ -48,6 +53,9 @@ def compute_spectrum(sample_rate_hz, samples):
 
 
 def analyze_window(window):
+    """Compute a spectrum for each axis of one raw window and find the
+    single largest peak across all three (skipping each axis's DC bin).
+    Returns (result dict ready for storage.store_fft_result, peak tuple)."""
     sample_rate_hz = window["sample_rate_hz"]
     result = {"sample_rate_hz": sample_rate_hz}
     freq_hz = None

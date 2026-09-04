@@ -126,6 +126,8 @@ def fetch_unanalyzed_windows(conn, limit=100):
 
 
 def store_fft_result(conn, window_id, device_id, result, peak):
+    """Persist one window's computed spectrum (per-axis FFT + shared
+    frequency bins) plus its overall peak (axis, frequency, amplitude)."""
     axis, peak_freq_hz, peak_amp = peak
     conn.execute(
         "INSERT INTO fft_results "
@@ -164,6 +166,8 @@ def store_baseline(conn, device_id, feature, mean, std, n_windows):
 
 
 def fetch_latest_baseline(conn, device_id, feature):
+    """Most recently computed baseline for one device+feature, or None if
+    none has been stored yet."""
     row = conn.execute(
         "SELECT mean, std, n_windows, computed_at FROM baselines "
         "WHERE device_id = ? AND feature = ? ORDER BY computed_at DESC LIMIT 1",
@@ -175,6 +179,8 @@ def fetch_latest_baseline(conn, device_id, feature):
 
 
 def store_classification(conn, window_id, device_id, feature_value, threshold, predicted_label):
+    """Record one window's classifier verdict (feature_value vs. threshold
+    -> predicted_label) for later review/scoring."""
     conn.execute(
         "INSERT INTO classifications "
         "(window_id, device_id, feature_value, threshold, predicted_label, classified_at) "

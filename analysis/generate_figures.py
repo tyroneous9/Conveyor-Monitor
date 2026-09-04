@@ -80,6 +80,8 @@ def fetch_series(conn, device_id, ranges):
 
 
 def plot_spectrum(h, w, out_path):
+    """Overlay one healthy and one worn window's frequency spectrum (up to
+    100Hz) so the belt-pass peak's growth is directly visible."""
     fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
     cutoff = next(i for i, f in enumerate(h["freq_hz"]) if f > 100) + 1
 
@@ -112,6 +114,9 @@ def plot_spectrum(h, w, out_path):
 
 
 def plot_waveform(h, w, out_path):
+    """Side-by-side raw time-domain (pre-FFT) traces for one healthy and
+    one worn window, so the reader sees the input the spectrum plots are
+    derived from."""
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.2), dpi=150, sharey=True)
     t_h = np.arange(len(h["ay"])) / h["sample_rate_hz"] * 1000
     t_w = np.arange(len(w["ay"])) / w["sample_rate_hz"] * 1000
@@ -135,6 +140,9 @@ def plot_waveform(h, w, out_path):
 
 
 def plot_repeatability(h_freq, h_amp, w_freq, w_amp, out_path):
+    """Scatter peak frequency and peak amplitude across every window in
+    each session, to show whether healthy/worn separate consistently
+    (repeatably) rather than just in the one window plot_spectrum picked."""
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), dpi=150)
     n = np.arange(1, len(h_freq) + 1)
 
@@ -180,6 +188,8 @@ def describe_test(healthy, worn, decimals):
 
 
 def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
+    """Write a markdown table comparing healthy vs. worn peak frequency and
+    peak amplitude (mean ± std plus the Mann-Whitney test result for each)."""
     freq_row = describe_test(h_freq, w_freq, decimals=2)
     amp_row = describe_test(h_amp, w_amp, decimals=2)
 

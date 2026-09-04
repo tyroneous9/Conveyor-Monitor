@@ -49,6 +49,8 @@ log = logging.getLogger("ingest")
 
 
 def validate_payload(payload):
+    """Raise ValueError unless ax/ay/az are all present and the same length
+    (a malformed or truncated window from the firmware)."""
     lengths = {len(payload[axis]) for axis in AXES}
     if len(lengths) != 1:
         raise ValueError(f"axis sample arrays have mismatched lengths: {lengths}")
@@ -66,6 +68,11 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
+    """Per-message MQTT callback: parse device_id out of the topic
+    (sensors/<device_id>/vibration/raw), validate the JSON payload, and
+    store it as one raw window. Any failure just logs and drops that one
+    message -- a bad window from one device shouldn't stop the client's
+    event loop or affect other devices."""
     parts = msg.topic.split("/")
     if len(parts) != 4:
         log.warning("ignoring message on unexpected topic: %s", msg.topic)

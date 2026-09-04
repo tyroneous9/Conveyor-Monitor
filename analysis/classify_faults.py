@@ -92,6 +92,9 @@ def compute_baseline(healthy_windows, band_center_hz, band_width_hz, baseline_fr
 
 
 def classify_windows(conn, windows, device_id, threshold, band_center_hz, band_width_hz):
+    """Apply the threshold to each window (belt_band_amplitude > threshold
+    => "worn"), persist each verdict via storage.store_classification, and
+    return them for reporting/plotting."""
     results = []
     for c in windows:
         value = band_amplitude(c["freq_hz"], c["fft_ay"], band_center_hz, band_width_hz)
@@ -102,6 +105,8 @@ def classify_windows(conn, windows, device_id, threshold, band_center_hz, band_w
 
 
 def confusion_counts(rows):
+    """(true positive, true negative, false positive, false negative)
+    counts, "worn" treated as the positive class."""
     tp = sum(1 for r in rows if r["true"] == "worn" and r["predicted"] == "worn")
     tn = sum(1 for r in rows if r["true"] == "healthy" and r["predicted"] == "healthy")
     fp = sum(1 for r in rows if r["true"] == "healthy" and r["predicted"] == "worn")
@@ -110,10 +115,15 @@ def confusion_counts(rows):
 
 
 def fmt_ranges(ranges):
+    """Render a list of (start, end) unix-timestamp tuples for the report."""
     return ", ".join(f"[{a:.0f}, {b:.0f}]" for a, b in ranges)
 
 
 def write_report(rows, threshold, baseline_mean, baseline_std, n_std, device_id, healthy_ranges, worn_ranges, out_path):
+    """Build the confusion matrix + accuracy/precision/recall for `rows`
+    and write it as a markdown table to out_path. Returns the report lines
+    (for printing to stdout too) and the (accuracy, precision, recall)
+    tuple."""
     tp, tn, fp, fn = confusion_counts(rows)
     n = len(rows)
     accuracy = (tp + tn) / n if n else float("nan")
@@ -140,6 +150,11 @@ def write_report(rows, threshold, baseline_mean, baseline_std, n_std, device_id,
 
 
 def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
+    """Scatter every window's feature value by window id, colored by true
+    label (healthy/worn) and shaped by role (which of baseline-fit,
+    held-out, evaluated it played -- see the module docstring's methodology
+    note), with the threshold line and the baseline's ±1 std band overlaid
+    for context."""
     fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
 
     markers = {"baseline-fit": "o", "held-out": "^", "evaluated": "s"}

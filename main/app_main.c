@@ -71,6 +71,10 @@ static sample_window_t s_windows[WINDOW_QUEUE_DEPTH];
 static QueueHandle_t s_free_queue;
 static QueueHandle_t s_ready_queue;
 
+/* MQTT client event callback, registered in mqtt_app_start. Just tracks
+ * connection state (s_mqtt_connected, read by publish_task) and logs --
+ * publishing itself doesn't wait for this, since QoS 1 + the outbox handle
+ * buffering while disconnected. */
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     (void)handler_args;
@@ -131,6 +135,9 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(s_mqtt_client);
 }
 
+/* Fills s_device_topic with sensors/esp32-<last 3 MAC bytes>/vibration/raw,
+ * so each device publishes to its own topic without any manual per-device
+ * configuration. */
 static void build_device_topic(void)
 {
     uint8_t mac[6] = {0};
@@ -163,6 +170,10 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
     return true;
 }
 
+/* Serializes one full window to the JSON contract documented at the top of
+ * this file (and consumed by backend/ingest.py):
+ *   {"sample_rate_hz":N,"ax":[...],"ay":[...],"az":[...]}
+ * Returns false (leaving *out_len untouched) if it wouldn't fit in buf. */
 static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_size, size_t *out_len)
 {
     size_t offset = 0;
@@ -179,6 +190,10 @@ static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_
 
 #undef APPEND
 
+/* Consumer side of the free/ready queue pair described above s_free_queue:
+ * blocks until sample_timer_cb hands off a full window, turns it into JSON,
+ * publishes it over MQTT, then returns the buffer to the free pool. Runs as
+ * its own task so a slow publish never delays the next sample. */
 static void publish_task(void *arg)
 {
     (void)arg;
@@ -258,6 +273,8 @@ static void sample_timer_cb(void *arg)
 
 void app_main(void)
 {
+    /* ESP-IDF baseline: NVS backs WiFi credential storage, esp_netif +
+     * the default event loop are required by both WiFi and MQTT. */
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -278,6 +295,8 @@ void app_main(void)
 
     mqtt_app_start();
 
+    /* Seed the free queue with every buffer index so sample_timer_cb has a
+     * pool to check out from as soon as sampling starts. */
     s_free_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     s_ready_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     configASSERT(s_free_queue != NULL && s_ready_queue != NULL);
@@ -287,6 +306,9 @@ void app_main(void)
 
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
 
+    /* Starts the periodic sampling timer last, only once WiFi/MQTT/the
+     * publish task are all up, so sample_timer_cb never runs against
+     * half-initialized state. */
     const esp_timer_create_args_t timer_args = {
         .callback = sample_timer_cb,
         .name = "sample_timer",

@@ -40,6 +40,8 @@ def parse_ranges(raw_ranges):
 
 
 def label_for(received_at, healthy_ranges, worn_ranges):
+    """"healthy"/"worn"/None depending on which set of ranges (if any) this
+    window's timestamp falls inside."""
     if any(start <= received_at <= end for start, end in healthy_ranges):
         return "healthy"
     if any(start <= received_at <= end for start, end in worn_ranges):
@@ -48,6 +50,9 @@ def label_for(received_at, healthy_ranges, worn_ranges):
 
 
 def resolve_device_id(conn, table, explicit):
+    """Return `explicit` if given; otherwise auto-detect it as the sole
+    distinct device_id in `table`, erroring out if there's more than one
+    (ambiguous -- the caller must say which device they mean)."""
     if explicit:
         return explicit
     rows = conn.execute(f"SELECT DISTINCT device_id FROM {table}").fetchall()
