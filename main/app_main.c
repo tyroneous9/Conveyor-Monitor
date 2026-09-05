@@ -5,9 +5,9 @@
  *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
  *   2. Connects to a plain (non-TLS) MQTT broker
  *   3. Samples the MPU6050 accelerometer at a fixed rate (esp_timer, not the
- *      FreeRTOS tick -- see the comment on s_sample_timer) into a small pool
+ *      FreeRTOS tick -- see the comment on sample_timer) into a small pool
  *      of window buffers, handed off to a separate publish task over a pair
- *      of FreeRTOS queues (see the comment on s_free_queue), which publishes
+ *      of FreeRTOS queues (see the comment on free_buffer_queue), which publishes
  *      each full window as one JSON message to
  *      sensors/<device_id>/vibration/raw. See backend/ingest.py for the
  *      consumer side of this exact contract.
@@ -50,31 +50,31 @@ typedef struct {
     float az[WINDOW_SIZE];
 } sample_window_t;
 
-static esp_mqtt_client_handle_t s_mqtt_client;
-static volatile bool s_mqtt_connected;
-static mpu6050_handle_t s_mpu6050;
-static char s_device_topic[64];
-static esp_timer_handle_t s_sample_timer;
-static char s_json_buf[JSON_BUFFER_SIZE];
+static esp_mqtt_client_handle_t mqtt_client;
+static volatile bool mqtt_is_connected;
+static mpu6050_handle_t mpu6050_sensor;
+static char device_topic[64];
+static esp_timer_handle_t sample_timer;
+static char window_json_buf[JSON_BUFFER_SIZE];
 
 /* A WINDOW_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
  * queues, so a slow MQTT publish (network I/O, in publish_task) never blocks
  * or delays the next sample due (in sample_timer_cb):
- *   - s_free_queue holds indices of buffers safe to fill. sample_timer_cb
+ *   - free_buffer_queue holds indices of buffers safe to fill. sample_timer_cb
  *     checks one out to fill and, once full, hands its index to
- *     s_ready_queue.
- *   - publish_task blocks on s_ready_queue, publishes the window, then
- *     returns the index to s_free_queue.
- * If s_free_queue is ever empty, publish_task has fallen behind by a full
+ *     ready_buffer_queue.
+ *   - publish_task blocks on ready_buffer_queue, publishes the window, then
+ *     returns the index to free_buffer_queue.
+ * If free_buffer_queue is ever empty, publish_task has fallen behind by a full
  * window -- sample_timer_cb drops the sample and logs it rather than
  * overwriting a buffer publish_task might still be reading. */
 #define WINDOW_QUEUE_DEPTH 2
-static sample_window_t s_windows[WINDOW_QUEUE_DEPTH];
-static QueueHandle_t s_free_queue;
-static QueueHandle_t s_ready_queue;
+static sample_window_t window_pool[WINDOW_QUEUE_DEPTH];
+static QueueHandle_t free_buffer_queue;
+static QueueHandle_t ready_buffer_queue;
 
 /* MQTT client event callback, registered in mqtt_app_start. Just tracks
- * connection state (s_mqtt_connected, read by publish_task) and logs --
+ * connection state (mqtt_is_connected, read by publish_task) and logs --
  * publishing itself doesn't wait for this, since QoS 1 + the outbox handle
  * buffering while disconnected. */
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
@@ -86,11 +86,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to MQTT broker");
-        s_mqtt_connected = true;
+        mqtt_is_connected = true;
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Disconnected from MQTT broker");
-        s_mqtt_connected = false;
+        mqtt_is_connected = false;
         break;
     case MQTT_EVENT_PUBLISHED:
         ESP_LOGI(TAG, "Publish acknowledged, msg_id=%d", event->msg_id);
@@ -132,12 +132,12 @@ static void mqtt_app_start(void)
         .network.reconnect_timeout_ms = 2000,
     };
 
-    s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(s_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(s_mqtt_client);
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(mqtt_client);
 }
 
-/* Fills s_device_topic with sensors/esp32-<last 3 MAC bytes>/vibration/raw,
+/* Fills device_topic with sensors/esp32-<last 3 MAC bytes>/vibration/raw,
  * so each device publishes to its own topic without any manual per-device
  * configuration. */
 static void build_device_topic(void)
@@ -147,38 +147,38 @@ static void build_device_topic(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_read_mac failed: %s, using a placeholder device id", esp_err_to_name(err));
     }
-    snprintf(s_device_topic, sizeof(s_device_topic),
+    snprintf(device_topic, sizeof(device_topic),
              "sensors/esp32-%02x%02x%02x/vibration/raw", mac[3], mac[4], mac[5]);
 }
 
 /* Formats one more piece of text into `buf` at `offset` (printf-style).
- * Returns the new offset, or JSON_WRITE_FAILED if it wouldn't fit. 
+ * Returns the new offset, or JSON_WRITE_FAILED if it wouldn't fit.
  */
 #define JSON_WRITE_FAILED SIZE_MAX
 static size_t json_write(char *buf, size_t buf_size, size_t offset, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    int n = vsnprintf(buf + offset, buf_size - offset, fmt, args);
+    int written = vsnprintf(buf + offset, buf_size - offset, fmt, args);
     va_end(args);
 
-    if (n < 0 || (size_t)n >= buf_size - offset) {
+    if (written < 0 || (size_t)written >= buf_size - offset) {
         return JSON_WRITE_FAILED;
     }
-    return offset + (size_t)n;
+    return offset + (size_t)written;
 }
 
-/* Helper function to append "<key>":[<v0>,<v1>,...] at *poffset. 
- * Returns false if it would overflow buf_size AND ALSO does not update *poffset. */
-static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
-                                const char *key, const float *values, int n)
+/* Helper function to append "<key>":[<v0>,<v1>,...] at *out_offset.
+ * Returns false if it would overflow buf_size AND ALSO does not update *out_offset. */
+static bool append_float_array(char *buf, size_t buf_size, size_t *out_offset,
+                                const char *key, const float *values, int count)
 {
     // Write the key and opening bracket, e.x. "ax":[
-    size_t offset = json_write(buf, buf_size, *poffset, "\"%s\":[", key);
+    size_t offset = json_write(buf, buf_size, *out_offset, "\"%s\":[", key);
     if (offset == JSON_WRITE_FAILED) return false;
 
     // Write each value, comma-separated, e.x. 1,2,3
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < count; i++) {
         offset = json_write(buf, buf_size, offset, i == 0 ? "%.4f" : ",%.4f", values[i]);
         if (offset == JSON_WRITE_FAILED) return false;
     }
@@ -188,7 +188,7 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
     if (offset == JSON_WRITE_FAILED) return false;
 
     // Success: update the caller's offset and return true
-    *poffset = offset;
+    *out_offset = offset;
     return true;
 }
 
@@ -196,22 +196,22 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
  * this file (and consumed by backend/ingest.py):
  *   {"sample_rate_hz":N,"ax":[...],"ay":[...],"az":[...]}
  * Returns false (leaving *out_len untouched) if it wouldn't fit in buf. */
-static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_size, size_t *out_len)
+static bool build_window_json(const sample_window_t *window, char *buf, size_t buf_size, size_t *out_len)
 {
     size_t offset = json_write(buf, buf_size, 0, "{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
     if (offset == JSON_WRITE_FAILED) return false;
 
-    if (!append_float_array(buf, buf_size, &offset, "ax", win->ax, WINDOW_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "ax", window->ax, WINDOW_SIZE)) return false;
 
     offset = json_write(buf, buf_size, offset, ",");
     if (offset == JSON_WRITE_FAILED) return false;
 
-    if (!append_float_array(buf, buf_size, &offset, "ay", win->ay, WINDOW_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "ay", window->ay, WINDOW_SIZE)) return false;
 
     offset = json_write(buf, buf_size, offset, ",");
     if (offset == JSON_WRITE_FAILED) return false;
 
-    if (!append_float_array(buf, buf_size, &offset, "az", win->az, WINDOW_SIZE)) return false;
+    if (!append_float_array(buf, buf_size, &offset, "az", window->az, WINDOW_SIZE)) return false;
 
     offset = json_write(buf, buf_size, offset, "}");
     if (offset == JSON_WRITE_FAILED) return false;
@@ -220,50 +220,54 @@ static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_
     return true;
 }
 
-/* Consumer side of the free/ready queue pair described above s_free_queue:
+/* esp_mqtt_client_publish()'s documented (but unnamed, in the library itself)
+ * return value meaning "the outbox is full" -- see mqtt_client.h. */
+#define MQTT_PUBLISH_OUTBOX_FULL (-2)
+
+/* Consumer side of the free/ready queue pair described above free_buffer_queue:
  * blocks until sample_timer_cb hands off a full window, turns it into JSON,
  * publishes it over MQTT, then returns the buffer to the free pool. Runs as
  * its own task so a slow publish never delays the next sample. */
 static void publish_task(void *arg)
 {
     (void)arg;
-    int ready_buf;
+    int ready_window_index;
 
     while (1) {
 
         // Block until a window is in the ready queue
-        if (xQueueReceive(s_ready_queue, &ready_buf, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(ready_buffer_queue, &ready_window_index, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
         // Convert the window to JSON, dropping it IF too large (unexpected values), THEN return buffer to free pool early
         size_t len;
-        if (!build_window_json(&s_windows[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
+        if (!build_window_json(&window_pool[ready_window_index], window_json_buf, sizeof(window_json_buf), &len)) {
             ESP_LOGE(TAG, "Window JSON exceeded %d-byte buffer, dropping window", JSON_BUFFER_SIZE);
-            xQueueSend(s_free_queue, &ready_buf, 0);
+            xQueueSend(free_buffer_queue, &ready_window_index, 0);
             continue;
         }
 
-        /* Publish unconditionally, even while s_mqtt_connected is false: at
+        /* Publish unconditionally, even while mqtt_is_connected is false: at
          * QoS 1 the client queues into its outbox (bounded by
          * OUTBOX_LIMIT_BYTES above) and flushes it on reconnect, so a brief
          * drop no longer means a silently lost window. */
-        int msg_id = esp_mqtt_client_publish(s_mqtt_client, s_device_topic, s_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
-        if (msg_id == -2) {
+        int msg_id = esp_mqtt_client_publish(mqtt_client, device_topic, window_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
+        if (msg_id == MQTT_PUBLISH_OUTBOX_FULL) {
             ESP_LOGW(TAG, "Outbox full, dropping window (broker unreachable too long)");
-        } else if (!s_mqtt_connected) {
+        } else if (!mqtt_is_connected) {
             ESP_LOGI(TAG, "Queued %d-sample window for %s while disconnected (outbox=%d bytes)",
-                     WINDOW_SIZE, s_device_topic, esp_mqtt_client_get_outbox_size(s_mqtt_client));
+                     WINDOW_SIZE, device_topic, esp_mqtt_client_get_outbox_size(mqtt_client));
         } else {
-            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
+            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, device_topic, (int)len);
         }
 
         // Return buffer to free pool so sample_timer_cb can check it out again
-        xQueueSend(s_free_queue, &ready_buf, 0);
+        xQueueSend(free_buffer_queue, &ready_window_index, 0);
     }
 }
 
-/* Samples accelerometer data once into a window buffer from s_free_queue, handing it off to s_ready_queue once full (window filled).
+/* Samples accelerometer data once into a window buffer from free_buffer_queue, handing it off to ready_buffer_queue once full (window filled).
  * Skips sampling when no free buffer is available (publish_task has fallen behind).
 */
 static void sample_timer_cb(void *arg)
@@ -271,36 +275,36 @@ static void sample_timer_cb(void *arg)
     (void)arg;
 
     // Index of pool buffer this window is filling, or -1 when none (start of a new window).
-    static int s_active_buf = -1;
+    static int active_window_index = -1;
     // Index of next sample to write into the active buffer, reset to 0 for new window.
-    static int s_fill_index;
+    static int next_sample_index;
 
-    if (s_active_buf < 0) {
-        if (xQueueReceive(s_free_queue, &s_active_buf, 0) != pdTRUE) {
+    if (active_window_index < 0) {
+        if (xQueueReceive(free_buffer_queue, &active_window_index, 0) != pdTRUE) {
             ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
             return;
         }
-        s_fill_index = 0;
+        next_sample_index = 0;
     }
 
     mpu6050_measurements_t accel;
-    esp_err_t err = mpu6050_read_accel(s_mpu6050, &accel);
+    esp_err_t err = mpu6050_read_accel(mpu6050_sensor, &accel);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
         return;
     }
 
     // Write the sample into the active buffer
-    sample_window_t *buf = &s_windows[s_active_buf];
-    buf->ax[s_fill_index] = accel.accel_x;
-    buf->ay[s_fill_index] = accel.accel_y;
-    buf->az[s_fill_index] = accel.accel_z;
-    s_fill_index++;
+    sample_window_t *buf = &window_pool[active_window_index];
+    buf->ax[next_sample_index] = accel.accel_x;
+    buf->ay[next_sample_index] = accel.accel_y;
+    buf->az[next_sample_index] = accel.accel_z;
+    next_sample_index++;
 
     // If the window is filled to max, send the buffer to the ready queue for publishing
-    if (s_fill_index >= WINDOW_SIZE) {
-        xQueueSend(s_ready_queue, &s_active_buf, 0);
-        s_active_buf = -1;
+    if (next_sample_index >= WINDOW_SIZE) {
+        xQueueSend(ready_buffer_queue, &active_window_index, 0);
+        active_window_index = -1;
     }
 }
 
@@ -320,7 +324,7 @@ void app_main(void)
         .i2c_freq_hz = CONFIG_MPU6050_I2C_FREQ_HZ,
         .accel_fs = MPU6050_ACCEL_FS_4G,
     };
-    ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &s_mpu6050));
+    ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &mpu6050_sensor));
 
     /* Connects to WiFi using the SSID/password configured in
      * `idf.py menuconfig` under "Example Connection Configuration". */
@@ -330,11 +334,11 @@ void app_main(void)
 
     /* Seed the free queue with every buffer index so sample_timer_cb has a
      * pool to check out from as soon as sampling starts. */
-    s_free_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
-    s_ready_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
-    configASSERT(s_free_queue != NULL && s_ready_queue != NULL);
+    free_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
+    ready_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
+    configASSERT(free_buffer_queue != NULL && ready_buffer_queue != NULL);
     for (int i = 0; i < WINDOW_QUEUE_DEPTH; i++) {
-        xQueueSend(s_free_queue, &i, 0);
+        xQueueSend(free_buffer_queue, &i, 0);
     }
 
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
@@ -346,6 +350,6 @@ void app_main(void)
         .callback = sample_timer_cb,
         .name = "sample_timer",
     };
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_sample_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, 1000000 / SAMPLE_RATE_HZ));
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &sample_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(sample_timer, 1000000 / SAMPLE_RATE_HZ));
 }
