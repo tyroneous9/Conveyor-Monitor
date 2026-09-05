@@ -45,10 +45,10 @@ def compute_spectrum(sample_rate_hz, samples):
     dominate the FFT; the Hann window tapers the edges of the (non-periodic)
     sample window to reduce spectral leakage; rfft exploits the input being
     real-valued to skip the redundant negative-frequency half."""
-    n = len(samples)
-    windowed = (samples - np.mean(samples)) * np.hanning(n)
+    n_samples = len(samples)
+    windowed = (samples - np.mean(samples)) * np.hanning(n_samples)
     spectrum = np.abs(np.fft.rfft(windowed))
-    freq_hz = np.fft.rfftfreq(n, d=1.0 / sample_rate_hz)
+    freq_hz = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate_hz)
     return freq_hz, spectrum
 
 

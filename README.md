@@ -98,6 +98,8 @@ I replaced the delay with `esp_timer`, a hardware timer independent of the FreeR
 
 Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
 
+I avoided using the vendor's MPU6050 drivers as they add an additional fixed 500Hz to every sample due to reading a configuration register, even though it is defined once at init.
+
 **2. Locally hosted broker:**
 My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
