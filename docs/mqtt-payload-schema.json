@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2026-05/schema",
+  "$id": "https://conveyor-monitor/schemas/vibration-window.json",
+  "title": "Vibration window",
+  "description": "One fixed-rate accelerometer sample window, published by the ESP32 firmware (main/app_main.c, build_window_json) and consumed by the Pi ingest service (backend/ingest.py, validate_payload). Published to topic sensors/<device_id>/vibration/raw.",
+  "type": "object",
+  "properties": {
+    "sample_rate_hz": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Sampling rate in Hz, fixed at build time (SAMPLE_RATE_HZ)."
+    },
+    "ax": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 1,
+      "description": "X-axis acceleration samples, in window order."
+    },
+    "ay": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 1,
+      "description": "Y-axis acceleration samples, in window order."
+    },
+    "az": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 1,
+      "description": "Z-axis acceleration samples, in window order."
+    }
+  },
+  "required": ["sample_rate_hz", "ax", "ay", "az"],
+  "additionalProperties": false,
+  "$comment": "ax/ay/az must all be the same length (one window's worth of samples per axis) -- JSON Schema can't express a cross-field length constraint like this on its own, so ingest.py's validate_payload() checks it separately at runtime."
+}

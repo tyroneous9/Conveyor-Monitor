@@ -13,7 +13,9 @@
  *      consumer side of this exact contract.
  */
 
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -149,23 +151,43 @@ static void build_device_topic(void)
              "sensors/esp32-%02x%02x%02x/vibration/raw", mac[3], mac[4], mac[5]);
 }
 
-/* Appends "<key>":[<v0>,<v1>,...] at *poffset. Returns false (without
- * modifying *poffset) if it would overflow buf_size. */
-#define APPEND(...) do { \
-        int _n = snprintf(buf + offset, buf_size - offset, __VA_ARGS__); \
-        if (_n < 0 || (size_t)_n >= buf_size - offset) { return false; } \
-        offset += (size_t)_n; \
-    } while (0)
+/* Formats one more piece of text into `buf` at `offset` (printf-style).
+ * Returns the new offset, or JSON_WRITE_FAILED if it wouldn't fit. 
+ */
+#define JSON_WRITE_FAILED SIZE_MAX
+static size_t json_write(char *buf, size_t buf_size, size_t offset, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf + offset, buf_size - offset, fmt, args);
+    va_end(args);
 
+    if (n < 0 || (size_t)n >= buf_size - offset) {
+        return JSON_WRITE_FAILED;
+    }
+    return offset + (size_t)n;
+}
+
+/* Helper function to append "<key>":[<v0>,<v1>,...] at *poffset. 
+ * Returns false if it would overflow buf_size AND ALSO does not update *poffset. */
 static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
                                 const char *key, const float *values, int n)
 {
-    size_t offset = *poffset;
-    APPEND("\"%s\":[", key);
+    // Write the key and opening bracket, e.x. "ax":[
+    size_t offset = json_write(buf, buf_size, *poffset, "\"%s\":[", key);
+    if (offset == JSON_WRITE_FAILED) return false;
+
+    // Write each value, comma-separated, e.x. 1,2,3
     for (int i = 0; i < n; i++) {
-        APPEND(i == 0 ? "%.4f" : ",%.4f", values[i]);
+        offset = json_write(buf, buf_size, offset, i == 0 ? "%.4f" : ",%.4f", values[i]);
+        if (offset == JSON_WRITE_FAILED) return false;
     }
-    APPEND("]");
+
+    // Write the closing bracket, e.g. ]
+    offset = json_write(buf, buf_size, offset, "]");
+    if (offset == JSON_WRITE_FAILED) return false;
+
+    // Success: update the caller's offset and return true
     *poffset = offset;
     return true;
 }
@@ -176,19 +198,27 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *poffset,
  * Returns false (leaving *out_len untouched) if it wouldn't fit in buf. */
 static bool build_window_json(const sample_window_t *win, char *buf, size_t buf_size, size_t *out_len)
 {
-    size_t offset = 0;
-    APPEND("{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
+    size_t offset = json_write(buf, buf_size, 0, "{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
+    if (offset == JSON_WRITE_FAILED) return false;
+
     if (!append_float_array(buf, buf_size, &offset, "ax", win->ax, WINDOW_SIZE)) return false;
-    APPEND(",");
+
+    offset = json_write(buf, buf_size, offset, ",");
+    if (offset == JSON_WRITE_FAILED) return false;
+
     if (!append_float_array(buf, buf_size, &offset, "ay", win->ay, WINDOW_SIZE)) return false;
-    APPEND(",");
+
+    offset = json_write(buf, buf_size, offset, ",");
+    if (offset == JSON_WRITE_FAILED) return false;
+
     if (!append_float_array(buf, buf_size, &offset, "az", win->az, WINDOW_SIZE)) return false;
-    APPEND("}");
+
+    offset = json_write(buf, buf_size, offset, "}");
+    if (offset == JSON_WRITE_FAILED) return false;
+
     *out_len = offset;
     return true;
 }
-
-#undef APPEND
 
 /* Consumer side of the free/ready queue pair described above s_free_queue:
  * blocks until sample_timer_cb hands off a full window, turns it into JSON,
