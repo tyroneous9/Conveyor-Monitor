@@ -230,10 +230,13 @@ static void publish_task(void *arg)
     int ready_buf;
 
     while (1) {
+
+        // Block until a window is in the ready queue
         if (xQueueReceive(s_ready_queue, &ready_buf, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
+        // Convert the window to JSON, dropping it IF too large (unexpected values), THEN return buffer to free pool early
         size_t len;
         if (!build_window_json(&s_windows[ready_buf], s_json_buf, sizeof(s_json_buf), &len)) {
             ESP_LOGE(TAG, "Window JSON exceeded %d-byte buffer, dropping window", JSON_BUFFER_SIZE);
@@ -255,23 +258,21 @@ static void publish_task(void *arg)
             ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, s_device_topic, (int)len);
         }
 
+        // Return buffer to free pool so sample_timer_cb can check it out again
         xQueueSend(s_free_queue, &ready_buf, 0);
     }
 }
 
-/* Runs in the esp_timer task at a fixed SAMPLE_RATE_HZ, independent of the
- * FreeRTOS tick rate (CONFIG_FREERTOS_HZ=100 here, i.e. 10ms resolution --
- * far too coarse for e.g. a 500Hz/2ms sample period). Kept minimal (one I2C
- * read, one buffer write) so it doesn't fall behind its own schedule; the
- * slow part (JSON + network publish) happens in publish_task instead. */
+/* Samples accelerometer data once into a window buffer from s_free_queue, handing it off to s_ready_queue once full (window filled).
+ * Skips sampling when no free buffer is available (publish_task has fallen behind).
+*/
 static void sample_timer_cb(void *arg)
 {
     (void)arg;
-    /* Which pool buffer this window is filling, or -1 between windows.
-     * Static: this callback only ever runs from the single esp_timer task,
-     * one invocation at a time, so there's no concurrent access to guard
-     * against. */
+
+    // Index of pool buffer this window is filling, or -1 when none (start of a new window).
     static int s_active_buf = -1;
+    // Index of next sample to write into the active buffer, reset to 0 for new window.
     static int s_fill_index;
 
     if (s_active_buf < 0) {
@@ -289,12 +290,14 @@ static void sample_timer_cb(void *arg)
         return;
     }
 
+    // Write the sample into the active buffer
     sample_window_t *buf = &s_windows[s_active_buf];
     buf->ax[s_fill_index] = accel.accel_x;
     buf->ay[s_fill_index] = accel.accel_y;
     buf->az[s_fill_index] = accel.accel_z;
     s_fill_index++;
 
+    // If the window is filled to max, send the buffer to the ready queue for publishing
     if (s_fill_index >= WINDOW_SIZE) {
         xQueueSend(s_ready_queue, &s_active_buf, 0);
         s_active_buf = -1;

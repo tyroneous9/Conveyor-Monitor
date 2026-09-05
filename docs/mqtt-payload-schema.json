@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2026-05/schema",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://conveyor-monitor/schemas/vibration-window.json",
   "title": "Vibration window",
   "description": "One fixed-rate accelerometer sample window, published by the ESP32 firmware (main/app_main.c, build_window_json) and consumed by the Pi ingest service (backend/ingest.py, validate_payload). Published to topic sensors/<device_id>/vibration/raw.",
