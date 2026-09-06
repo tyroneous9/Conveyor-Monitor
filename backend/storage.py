@@ -1,13 +1,10 @@
 """SQLite storage for raw accelerometer windows and their derived FFT spectra.
 
-SQLite, not a client/server DB (Postgres, etc.): writes come from one
-process at a time (ingest.py, then separately analyze_fft.py), write volume
+Writes come from one process at a time (ingest.py, then separately analyze_fft.py), write volume
 is one row per window, and a single file needs no separate daemon competing
 with Mosquitto + these scripts for the Pi's resources. WAL mode is enabled
 so /analysis notebooks can read the file concurrently with either writer.
 
-raw_windows and fft_results are deliberately separate tables written by
-separate scripts (ingest.py, analyze_fft.py) -- see those files.
 """
 
 import json

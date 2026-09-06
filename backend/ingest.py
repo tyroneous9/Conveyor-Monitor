@@ -14,7 +14,6 @@ this same database; keeping the two apart means ingestion never blocks on
 any time without re-touching MQTT.
 
 Usage:
-    pip install -r requirements.txt
     MQTT_BROKER_HOST=<broker-lan-ip> python3 ingest.py
 (defaults to localhost:1883, i.e. running on the same device as the broker)
 """

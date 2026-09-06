@@ -126,3 +126,31 @@ Another concern is that belt is unlikely to be the only fault in the conveyor be
 
 **2. PCB migration:**
 The sensor circuit currently runs on a breadboard with an ESP32 dev board. This was good for prototyping, but installing it along multiple places along the conveyor belt is not cheap nor efficient. A PCB would be ideal to cut power use and make mounting more practical.
+
+
+## Setup
+
+**Firmware** (ESP-IDF):
+```
+idf.py set-target esp32
+idf.py menuconfig   # set WiFi credentials and the MQTT broker URI (see main/Kconfig.projbuild)
+idf.py build flash monitor
+```
+
+**Broker** (on the Pi):
+```
+sudo apt install mosquitto mosquitto-clients
+sudo cp deploy/mosquitto/conveyor-monitor.conf /etc/mosquitto/conf.d/
+sudo systemctl enable --now mosquitto
+```
+Listens on LAN: only safe on a private network (see `deploy/mosquitto/conveyor-monitor.conf`).
+
+**Backend** (on the Pi):
+```
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python3 ingest.py
+python3 analyze_fft.py --watch 30
+```
