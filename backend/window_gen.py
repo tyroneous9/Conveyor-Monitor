@@ -10,7 +10,13 @@ model, not a calibrated match to the README's specific numbers -- every
 window draws its own amplitudes, frequencies, and noise from randomized
 ranges (rather than one fixed value repeated every window), and the noise
 floor is high enough that healthy and worn windows aren't always cleanly
-separable, the way real sensor data wouldn't be either.
+separable, the way real sensor data wouldn't be either. On top of that,
+a small fraction of windows draw their belt-pass amplitude from the
+*other* condition's range (BELT_OVERLAP_PROB) -- a healthy belt
+occasionally throws a noise burst that reads worn for one window, and a
+worn belt has mild/early-stage windows that still read close to healthy
+-- so classify_faults.py sees a handful of genuine misclassifications
+instead of textbook-clean separation.
 
 Windows are written straight to raw_windows via storage.store_window, the
 same entrypoint ingest.py uses, so downstream scripts can't tell them from
@@ -52,6 +58,18 @@ BELT_AMPLITUDE_HEALTHY_RANGE_G = (0.0, 0.03)  # stays buried under the noise flo
 BELT_AMPLITUDE_WORN_RANGE_G = (0.12, 0.5)  # wide range: wear severity varies
 BELT_HARMONIC_RATIO_RANGE = (0.1, 0.4)  # a worn belt vibrates impulsively, not as a pure sinusoid
 
+# Rare draws of belt amplitude from the *other* condition's range -- see the
+# module docstring. Healthy overlaps less often than worn: early-stage wear
+# reading mild is more common than a healthy belt throwing a noise burst.
+BELT_OVERLAP_PROB = {"healthy": 0.06, "worn": 0.08}
+
+# Independent per-axis phase jitter: a real accelerometer's three axes don't
+# see the exact same waveform scaled by a constant gain -- each axis has its
+# own structural coupling path back to the vibration source, so their phase
+# drifts apart slightly even though they're driven by the same underlying
+# motion.
+AXIS_PHASE_JITTER_RAD = 0.3
+
 # High enough, relative to MOTOR_AMPLITUDE_RANGE_G, that a noise spike can
 # occasionally outweigh the real peak on a healthy window -- real sensor
 # data doesn't separate as cleanly as a hand-picked constant would.
@@ -72,24 +90,35 @@ def generate_window(condition, rng):
     motor-rotation + belt-pass sinusoids (with a harmonic on the belt-pass
     term) at per-axis gain, plus gaussian noise and az's gravity offset.
     Every amplitude and frequency is redrawn per window, so no two windows
-    (even of the same condition) are identical."""
+    (even of the same condition) are identical. A small fraction of windows
+    draw belt amplitude from the other condition's range (BELT_OVERLAP_PROB),
+    and each axis gets its own small phase jitter rather than sharing one
+    waveform scaled by a constant gain."""
     t = np.arange(WINDOW_SAMPLES) / SAMPLE_RATE_HZ
 
     motor_freq = MOTOR_FREQ_HZ + rng.normal(0, MOTOR_FREQ_JITTER_HZ)
     belt_freq = BELT_FREQ_HZ + rng.normal(0, BELT_FREQ_JITTER_HZ)
     motor_amplitude = rng.uniform(*MOTOR_AMPLITUDE_RANGE_G)
-    belt_range = BELT_AMPLITUDE_WORN_RANGE_G if condition == "worn" else BELT_AMPLITUDE_HEALTHY_RANGE_G
+
+    condition_range = BELT_AMPLITUDE_WORN_RANGE_G if condition == "worn" else BELT_AMPLITUDE_HEALTHY_RANGE_G
+    overlap_range = BELT_AMPLITUDE_HEALTHY_RANGE_G if condition == "worn" else BELT_AMPLITUDE_WORN_RANGE_G
+    belt_range = overlap_range if rng.random() < BELT_OVERLAP_PROB[condition] else condition_range
     belt_amplitude = rng.uniform(*belt_range)
     harmonic_ratio = rng.uniform(*BELT_HARMONIC_RATIO_RANGE)
 
-    vibration = (
-        motor_amplitude * np.sin(2 * np.pi * motor_freq * t + rng.uniform(0, 2 * np.pi))
-        + belt_amplitude * np.sin(2 * np.pi * belt_freq * t + rng.uniform(0, 2 * np.pi))
-        + belt_amplitude * harmonic_ratio * np.sin(2 * np.pi * 2 * belt_freq * t + rng.uniform(0, 2 * np.pi))
-    )
+    motor_phase = rng.uniform(0, 2 * np.pi)
+    belt_phase = rng.uniform(0, 2 * np.pi)
+    belt_harmonic_phase = rng.uniform(0, 2 * np.pi)
 
     window = {"sample_rate_hz": SAMPLE_RATE_HZ}
     for axis, gain in AXIS_GAIN.items():
+        vibration = (
+            motor_amplitude * np.sin(2 * np.pi * motor_freq * t + motor_phase + rng.normal(0, AXIS_PHASE_JITTER_RAD))
+            + belt_amplitude * np.sin(2 * np.pi * belt_freq * t + belt_phase + rng.normal(0, AXIS_PHASE_JITTER_RAD))
+            + belt_amplitude * harmonic_ratio * np.sin(
+                2 * np.pi * 2 * belt_freq * t + belt_harmonic_phase + rng.normal(0, AXIS_PHASE_JITTER_RAD)
+            )
+        )
         offset = GRAVITY_G if axis == "az" else 0.0
         noise = rng.normal(0, NOISE_STD_G, WINDOW_SAMPLES)
         window[axis] = (offset + gain * vibration + noise).tolist()
