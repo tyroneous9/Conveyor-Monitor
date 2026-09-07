@@ -25,11 +25,15 @@ def add_session_args(parser):
     )
     parser.add_argument(
         "--healthy-range", nargs=2, metavar=("START", "END"), action="append", default=None,
-        help="a time range (unix timestamp or ISO 8601) the belt was known healthy; repeatable for multiple sessions",
+        help="a time range (unix timestamp or ISO 8601) the belt was known healthy; repeatable for "
+             "multiple sessions. Optional if --worn-range is also omitted: windows are then "
+             "auto-split in half by time instead",
     )
     parser.add_argument(
         "--worn-range", nargs=2, metavar=("START", "END"), action="append", default=None,
-        help="a time range (unix timestamp or ISO 8601) the belt was known worn; repeatable for multiple sessions",
+        help="a time range (unix timestamp or ISO 8601) the belt was known worn; repeatable for "
+             "multiple sessions. Optional if --healthy-range is also omitted: windows are then "
+             "auto-split in half by time instead",
     )
 
 
@@ -47,6 +51,26 @@ def label_for(received_at, healthy_ranges, worn_ranges):
     if any(start <= received_at <= end for start, end in worn_ranges):
         return "worn"
     return None
+
+
+def auto_split_ranges(conn, device_id):
+    """Fallback for when no --healthy-range/--worn-range is given: split
+    every analyzed window for device_id in half by time, earlier half
+    labeled healthy and later half worn.
+
+    This is a dev/testing convenience, not a substitute for real recorded
+    sessions -- device_id alone can't tell belt condition (see module
+    docstring), so this only makes sense for a session where the belt was
+    swapped partway through a single recording run."""
+    start, end = conn.execute(
+        "SELECT MIN(r.received_at), MAX(r.received_at) FROM raw_windows r "
+        "JOIN fft_results f ON f.window_id = r.id WHERE r.device_id = ?",
+        (device_id,),
+    ).fetchone()
+    if start is None:
+        raise SystemExit(f"no fft_results found for device_id={device_id!r}; can't auto-split by time")
+    mid = (start + end) / 2
+    return [(start, mid)], [(mid, end)]
 
 
 def resolve_device_id(conn, table, explicit):

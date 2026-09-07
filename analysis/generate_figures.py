@@ -10,10 +10,15 @@ output committed as static images for the README.
 Healthy vs. worn windows come from one device_id, split by which
 --healthy-range / --worn-range a window's timestamp falls in (see
 analysis/labels.py) -- device_id itself doesn't encode belt condition.
+--healthy-range/--worn-range are optional; when both are omitted, every
+analyzed window for the device is split in half by time (earlier half
+healthy, later half worn) as a dev/testing convenience -- pass explicit
+ranges for a real report.
 
 Usage:
-    pip install -r requirements.txt
-    python3 generate_figures.py --device-id esp32-a1b2c3 \\
+    python3 generate_figures.py --device-id sim01
+
+    python3 generate_figures.py --device-id sim01 \\
         --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
         --worn-range 2026-08-22T09:00 2026-08-22T11:00
 """
@@ -263,10 +268,17 @@ def main():
     device_id = labels.resolve_device_id(conn, "fft_results", args.device_id)
     healthy_ranges = labels.parse_ranges(args.healthy_range)
     worn_ranges = labels.parse_ranges(args.worn_range)
-    if not healthy_ranges:
-        raise SystemExit("--healthy-range is required (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
-    if not worn_ranges:
-        raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
+    if not healthy_ranges and not worn_ranges:
+        healthy_ranges, worn_ranges = labels.auto_split_ranges(conn, device_id)
+        print(
+            "no --healthy-range/--worn-range given; auto-splitting "
+            f"device_id={device_id!r}'s windows in half by time "
+            "(dev convenience -- pass explicit ranges for a real report)"
+        )
+    elif not healthy_ranges:
+        raise SystemExit("--worn-range given without --healthy-range (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
+    elif not worn_ranges:
+        raise SystemExit("--healthy-range given without --worn-range (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
 
     h_window = fetch_window(conn, device_id, healthy_ranges)
     w_window = fetch_window(conn, device_id, worn_ranges)

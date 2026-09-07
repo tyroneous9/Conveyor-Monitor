@@ -5,13 +5,12 @@ Reads windows that don't have a matching fft_results row yet and writes the anal
 
 Usage:
     FFT_DB_PATH=<path> python3 analyze_fft.py [--limit N]
-    FFT_DB_PATH=<path> python3 analyze_fft.py --watch 30   # loop every 30s
+    FFT_DB_PATH=fft_backend.sqlite3 python3 analyze_fft.py
 """
 
 import argparse
 import logging
 import os
-import time
 
 import numpy as np
 
@@ -30,7 +29,7 @@ log = logging.getLogger("analyze_fft")
 
 
 def compute_spectrum(sample_rate_hz, samples):
-    """Input one axis' samples and output its frequency spectrum. 
+    """Input one axis' samples and output its frequency spectrum (frequency AND magnitude). 
     The Hann window smooths the edges of the windows."""
     n_samples = len(samples)
     windowed = (samples - np.mean(samples)) * np.hanning(n_samples)
@@ -76,23 +75,11 @@ def run_once(conn, limit):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=100, help="max windows to process per run")
-    parser.add_argument(
-        "--watch", type=float, default=None, metavar="SECONDS",
-        help="keep running, checking for new windows every SECONDS instead of exiting after one pass",
-    )
     args = parser.parse_args()
 
     conn = storage.connect(DB_PATH)
-
-    if args.watch is None:
-        run_once(conn, args.limit)
-        log.info("done")
-        return
-
-    log.info("watching %s every %.0fs (Ctrl+C to stop)", DB_PATH, args.watch)
-    while True:
-        run_once(conn, args.limit)
-        time.sleep(args.watch)
+    run_once(conn, args.limit)
+    log.info("done")
 
 
 if __name__ == "__main__":

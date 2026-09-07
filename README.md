@@ -53,7 +53,7 @@ main/            ESP-IDF firmware: fixed-rate sampling, window buffering, MQTT p
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        Report figures, the classifier, Notebook
-deploy/          Mosquitto config + systemd units for running the broker and backend as persistent services on the Pi
+deploy/          Mosquitto config + systemd unit for running the broker and ingest.py as persistent services on the Pi
 ```
 
 ## Analysis results
@@ -152,5 +152,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python3 ingest.py
-python3 analyze_fft.py --watch 30
+python3 analyze_fft.py
 ```
+`analyze_fft.py` processes whatever unanalyzed windows exist and exits; run
+it again (e.g. from cron, or by hand) to pick up new ones.
