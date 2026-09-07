@@ -2,39 +2,13 @@
 """Threshold-based fault classifier: does a window's spectrum look like the
 healthy baseline, or does it look worn?
 
-Deliberately the simplest approach that could work: a fancier model would
-fit the quirks of the belt/load/speed combination it's trained on just as
-confidently as a threshold does, just less visibly -- a black-box model's
-weights don't announce that they're overfit. This stays interpretable: one
-feature (summed FFT amplitude in a band around the belt-pass frequency),
-one threshold (baseline mean + N standard deviations), recalibratable as
-more sessions get recorded -- a number change, not a retrain.
-
-Ground truth comes from operator-recorded recording sessions, labeled into
-the `window_labels` table by analysis/labels.py -- run that first (it
-explains why device_id can't be used for this). This script only reads
-whatever labels are currently stored; it doesn't know anything about
-recording sessions itself.
-
-Baseline/classification results are stored in the `baselines` and
-`classifications` tables (backend/storage.py) as durable, inspectable
-artifacts, not numbers recomputed silently inside this script every run.
-
-Methodology note: the baseline is fit on a held-out fraction of the
-healthy windows (--baseline-fraction, default 0.7, taken in window order)
-and evaluated against the *remaining* healthy fraction plus every worn
-window -- evaluating "does healthy data fall under threshold" on the same
-windows used to set that threshold would be circular for the healthy
-class.
+Results are stored in the `baselines` and `classifications` database tables.
 
 Usage:
     python3 labels.py \\
         --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
         --worn-range 2026-08-22T09:00 2026-08-22T11:00
     python3 classify_faults.py
-
-For local dev/testing without real hardware, backend/window_gen.py can
-seed a similar two-session dataset.
 """
 
 import argparse
@@ -48,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
-import storage  # noqa: E402  (reuses the schema + write functions rather than duplicating them)
+import storage # type: ignore
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
@@ -57,8 +31,8 @@ DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 FIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
 FEATURE_NAME = "belt_band_amplitude"
 
-HEALTHY_COLOR = "#2a78d6"
-WORN_COLOR = "#d03b3b"
+HEALTHY_COLOR = "#2dd62a"
+WORN_COLOR = "#ff4800"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("classify_faults")
@@ -67,7 +41,7 @@ log = logging.getLogger("classify_faults")
 def band_amplitude(freq_hz, fft_amp, center_hz, width_hz):
     """Sum of linear FFT magnitude within [center-width/2, center+width/2]
     -- a band, not a single bin, because motor/belt speed drifts run to
-    run (see README) and can shift the true peak to an adjacent bin
+    run and can shift the true peak to an adjacent bin
     between windows; a single-bin lookup would miss it."""
     lo, hi = center_hz - width_hz / 2, center_hz + width_hz / 2
     return sum(a for f, a in zip(freq_hz, fft_amp) if lo <= f <= hi)
