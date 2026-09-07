@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """MQTT ingestion for the Pi: writes raw accelerometer windows to SQLite.
 
-Subscribes to sensors/<device_id>/vibration/raw. Each message is one
-fixed-rate sample window from the ESP32, as JSON:
+Subscribes to sensors/vibration/raw. Each message is one fixed-rate sample
+window from the ESP32, as JSON:
 
     {"sample_rate_hz": 500, "ax": [...], "ay": [...], "az": [...]}
 
@@ -40,7 +40,7 @@ DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 # clean_session=False in main()) is only useful if the broker recognizes the
 # same client reconnecting.
 CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "conveyor-ingest")
-RAW_TOPIC_FILTER = "sensors/+/vibration/raw"
+RAW_TOPIC_FILTER = "sensors/vibration/raw"
 AXES = ("ax", "ay", "az")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -67,32 +67,24 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    """Per-message MQTT callback: parse device_id out of the topic
-    (sensors/<device_id>/vibration/raw), validate the JSON payload, and
-    store it as one raw window. Any failure just logs and drops that one
-    message -- a bad window from one device shouldn't stop the client's
-    event loop or affect other devices."""
-    parts = msg.topic.split("/")
-    if len(parts) != 4:
-        log.warning("ignoring message on unexpected topic: %s", msg.topic)
-        return
-    device_id = parts[1]
-
+    """Per-message MQTT callback: validate the JSON payload and store it as
+    one raw window. Any failure just logs and drops that one message
+    rather than stopping the client's event loop."""
     try:
         payload = json.loads(msg.payload)
         validate_payload(payload)
     except (ValueError, KeyError, json.JSONDecodeError) as exc:
-        log.warning("bad window from %s: %s", device_id, exc)
+        log.warning("bad window: %s", exc)
         return
 
     conn = userdata
     try:
-        window_id = storage.store_window(conn, device_id, payload)
+        window_id = storage.store_window(conn, payload)
     except sqlite3.Error as exc:
-        log.warning("failed to store window from %s: %s", device_id, exc)
+        log.warning("failed to store window: %s", exc)
         return
 
-    log.info("device=%s stored window_id=%d n=%d", device_id, window_id, len(payload["ax"]))
+    log.info("stored window_id=%d n=%d", window_id, len(payload["ax"]))
 
 
 def main():

@@ -15,30 +15,31 @@ deviations), recalibratable as more sessions get recorded -- a number
 change, not a retrain. Steps 2/3 remain available later if this proves too
 brittle.
 
-Ground truth comes from operator-recorded recording sessions, not device_id:
-one physical device (--device-id) gets moved between a known-healthy and a
-known-worn belt on different runs, and a window is labeled by which
---healthy-range / --worn-range its timestamp falls in.
+Ground truth comes from operator-recorded recording sessions, labeled into
+the `window_labels` table by analysis/labels.py -- run that first (it
+explains why device_id can't be used for this). This script only reads
+whatever labels are currently stored; it doesn't know anything about
+recording sessions itself.
 
 Baseline/classification results are stored in the `baselines` and
 `classifications` tables (backend/storage.py) as durable, inspectable
 artifacts, not numbers recomputed silently inside this script every run.
 
 Methodology note: the baseline is fit on a held-out fraction of the
-healthy range's windows (--baseline-fraction, default 0.7, taken in
-window order) and evaluated against the *remaining* healthy fraction plus
-every worn-range window -- evaluating "does healthy data fall under
-threshold" on the same windows used to set that threshold would be
-circular for the healthy class.
+healthy windows (--baseline-fraction, default 0.7, taken in window order)
+and evaluated against the *remaining* healthy fraction plus every worn
+window -- evaluating "does healthy data fall under threshold" on the same
+windows used to set that threshold would be circular for the healthy
+class.
 
 Usage:
-    pip install -r requirements.txt
-    python3 classify_faults.py --device-id esp32-a1b2c3 \\
+    python3 labels.py \\
         --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
         --worn-range 2026-08-22T09:00 2026-08-22T11:00
+    python3 classify_faults.py
 
-For local dev/testing without real hardware, backend/seed_samples.py can
-seed a similar two-session dataset under one device_id.
+For local dev/testing without real hardware, backend/window_gen.py can
+seed a similar two-session dataset.
 """
 
 import argparse
@@ -53,7 +54,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import storage  # noqa: E402  (reuses the schema + write functions rather than duplicating them)
-import labels  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
@@ -91,7 +91,7 @@ def compute_baseline(healthy_windows, band_center_hz, band_width_hz, baseline_fr
     return mean, std, fit_windows, holdout_windows
 
 
-def classify_windows(conn, windows, device_id, threshold, band_center_hz, band_width_hz):
+def classify_windows(conn, windows, threshold, band_center_hz, band_width_hz):
     """Apply the threshold to each window (belt_band_amplitude > threshold
     => "worn"), persist each verdict via storage.store_classification, and
     return them for reporting/plotting."""
@@ -99,7 +99,7 @@ def classify_windows(conn, windows, device_id, threshold, band_center_hz, band_w
     for c in windows:
         value = band_amplitude(c["freq_hz"], c["fft_ay"], band_center_hz, band_width_hz)
         predicted = "worn" if value > threshold else "healthy"
-        storage.store_classification(conn, c["window_id"], device_id, value, threshold, predicted)
+        storage.store_classification(conn, c["window_id"], value, threshold, predicted)
         results.append({"window_id": c["window_id"], "value": value, "predicted": predicted})
     return results
 
@@ -114,12 +114,7 @@ def confusion_counts(rows):
     return tp, tn, fp, fn
 
 
-def fmt_ranges(ranges):
-    """Render a list of (start, end) unix-timestamp tuples for the report."""
-    return ", ".join(f"[{a:.0f}, {b:.0f}]" for a, b in ranges)
-
-
-def write_report(rows, threshold, baseline_mean, baseline_std, n_std, device_id, healthy_ranges, worn_ranges, out_path):
+def write_report(rows, threshold, baseline_mean, baseline_std, n_std, n_healthy, n_worn, out_path):
     """Build the confusion matrix + accuracy/precision/recall for `rows`
     and write it as a markdown table to out_path. Returns the report lines
     (for printing to stdout too) and the (accuracy, precision, recall)
@@ -131,8 +126,8 @@ def write_report(rows, threshold, baseline_mean, baseline_std, n_std, device_id,
     recall = tp / (tp + fn) if (tp + fn) else float("nan")
 
     lines = [
-        f"Ground truth: device `{device_id}`, healthy range(s) {fmt_ranges(healthy_ranges)}, "
-        f"worn range(s) {fmt_ranges(worn_ranges)} (operator-recorded recording sessions).",
+        f"Ground truth: {n_healthy} healthy window(s), {n_worn} worn window(s) "
+        "(labeled via analysis/labels.py from operator-recorded recording sessions).",
         "",
         f"Threshold: `{FEATURE_NAME}` > {threshold:.3f} "
         f"(baseline {baseline_mean:.3f} + {n_std:g}×{baseline_std:.3f} std)",
@@ -193,41 +188,30 @@ def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    labels.add_session_args(parser)
     parser.add_argument("--band-center-hz", type=float, default=8.0, help="belt-pass frequency to search around")
     parser.add_argument("--band-width-hz", type=float, default=6.0,
                          help="wide enough to cover the jittered peak landing in an adjacent FFT bin")
     parser.add_argument("--n-std", type=float, default=3.0, help="threshold = baseline mean + n_std * baseline std")
     parser.add_argument("--baseline-fraction", type=float, default=0.7,
-                         help="fraction of the healthy range's windows (in window order) used to fit the baseline; rest are held out for evaluation")
+                         help="fraction of the healthy windows (in window order) used to fit the baseline; rest are held out for evaluation")
     args = parser.parse_args()
 
     os.makedirs(FIG_DIR, exist_ok=True)
     conn = storage.connect(DB_PATH)
 
-    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id, flag_hint="--device-id")
-    healthy_ranges = labels.parse_ranges(args.healthy_range)
-    worn_ranges = labels.parse_ranges(args.worn_range)
-    if not healthy_ranges:
-        raise SystemExit("--healthy-range is required (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
-    if not worn_ranges:
-        raise SystemExit("--worn-range is required (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
-
-    all_windows = storage.fetch_fft_results(conn, device_id)
-    for c in all_windows:
-        c["label"] = labels.label_for(c["received_at"], healthy_ranges, worn_ranges)
+    all_windows = storage.fetch_fft_results(conn)
     healthy_windows = [c for c in all_windows if c["label"] == "healthy"]
     worn_windows = [c for c in all_windows if c["label"] == "worn"]
     if not healthy_windows:
-        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --healthy-range")
+        raise SystemExit("no windows are labeled healthy; run analysis/labels.py first")
     if not worn_windows:
-        raise SystemExit(f"no windows from device_id={device_id!r} fall inside --worn-range")
+        raise SystemExit("no windows are labeled worn; run analysis/labels.py first")
 
     mean, std, fit_windows, holdout_windows = compute_baseline(
         healthy_windows, args.band_center_hz, args.band_width_hz, args.baseline_fraction
     )
     threshold = mean + args.n_std * std
-    storage.store_baseline(conn, device_id, FEATURE_NAME, mean, std, len(fit_windows))
+    storage.store_baseline(conn, FEATURE_NAME, mean, std, len(fit_windows))
 
     rows = []
     for c in fit_windows:
@@ -239,7 +223,7 @@ def main():
         (holdout_windows, "healthy", "held-out"),
         (worn_windows, "worn", "evaluated"),
     ):
-        classified = classify_windows(conn, windows, device_id, threshold, args.band_center_hz, args.band_width_hz)
+        classified = classify_windows(conn, windows, threshold, args.band_center_hz, args.band_width_hz)
         for c in classified:
             rows.append({**c, "true": true, "role": role})
         log.info("classified %d window(s) (%s)", len(classified), role)
@@ -249,7 +233,7 @@ def main():
     # test (fit windows still appear in the plot, for context, via `rows`).
     labeled_rows = [r for r in rows if r["role"] != "baseline-fit"]
     report_lines, (accuracy, precision, recall) = write_report(
-        labeled_rows, threshold, mean, std, args.n_std, device_id, healthy_ranges, worn_ranges,
+        labeled_rows, threshold, mean, std, args.n_std, len(healthy_windows), len(worn_windows),
         os.path.join(FIG_DIR, "classification_report.md"),
     )
     plot_classification(rows, threshold, mean, std, os.path.join(FIG_DIR, "classification.png"))

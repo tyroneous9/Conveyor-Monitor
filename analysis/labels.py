@@ -1,13 +1,38 @@
-"""Turns operator-recorded recording sessions into per-window healthy/worn
-labels, shared by classify_faults.py and generate_figures.py.
+#!/usr/bin/env python3
+"""Label recorded windows healthy/worn from operator-recorded session time
+ranges, storing the result in the `window_labels` table (backend/storage.py)
+so analysis/classify_faults.py and analysis/generate_figures.py can read a
+window's ground truth without knowing anything about recording sessions.
 
-One physical device gets moved between a known-healthy and a known-worn
-belt on different runs -- device_id (the ESP32's MAC address) carries no
-information about belt condition, so ground truth comes from which
-recorded time range a window's timestamp falls in instead.
+The one physical device gets moved between a known-healthy and a
+known-worn belt on different runs, so ground truth comes from which
+recorded time range a window's timestamp falls in, not from the data
+itself.
+
+Run this once after recording a healthy and a worn session, and again
+whenever a new session is recorded or a range needs correcting -- each run
+clears every previously stored label and relabels from scratch using
+exactly the ranges given, so the table never ends up a stale mix of old
+and new sessions.
+
+Usage:
+    python3 labels.py \\
+        --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
+        --worn-range 2026-08-22T09:00 2026-08-22T11:00
 """
 
+import argparse
+import os
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+import storage  # noqa: E402
+
+DEFAULT_DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
+)
+DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 
 
 def parse_ts(s):
@@ -18,80 +43,41 @@ def parse_ts(s):
         return datetime.fromisoformat(s).timestamp()
 
 
-def add_range_args(parser):
-    parser.add_argument(
-        "--healthy-range", nargs=2, metavar=("START", "END"), action="append", default=None,
-        help="a time range (unix timestamp or ISO 8601) the belt was known healthy; repeatable for "
-             "multiple sessions. Optional if --worn-range is also omitted: windows are then "
-             "auto-split in half by time instead",
-    )
-    parser.add_argument(
-        "--worn-range", nargs=2, metavar=("START", "END"), action="append", default=None,
-        help="a time range (unix timestamp or ISO 8601) the belt was known worn; repeatable for "
-             "multiple sessions. Optional if --healthy-range is also omitted: windows are then "
-             "auto-split in half by time instead",
-    )
-
-
-def add_session_args(parser):
-    parser.add_argument(
-        "--device-id", default=None,
-        help="physical device to read from; default: the only device_id present in fft_results (error if there's more than one)",
-    )
-    add_range_args(parser)
-
-
 def parse_ranges(raw_ranges):
     if not raw_ranges:
         return []
     return [(parse_ts(a), parse_ts(b)) for a, b in raw_ranges]
 
 
-def label_for(received_at, healthy_ranges, worn_ranges):
-    """"healthy"/"worn"/None depending on which set of ranges (if any) this
-    window's timestamp falls inside."""
-    if any(start <= received_at <= end for start, end in healthy_ranges):
-        return "healthy"
-    if any(start <= received_at <= end for start, end in worn_ranges):
-        return "worn"
-    return None
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--healthy-range", nargs=2, metavar=("START", "END"), action="append", required=True,
+        help="a time range (unix timestamp or ISO 8601) the belt was known healthy; repeatable for "
+             "multiple sessions",
+    )
+    parser.add_argument(
+        "--worn-range", nargs=2, metavar=("START", "END"), action="append", required=True,
+        help="a time range (unix timestamp or ISO 8601) the belt was known worn; repeatable for "
+             "multiple sessions",
+    )
+    args = parser.parse_args()
+
+    conn = storage.connect(DB_PATH)
+
+    healthy_ranges = parse_ranges(args.healthy_range)
+    worn_ranges = parse_ranges(args.worn_range)
+
+    storage.clear_labels(conn)
+    n_healthy = storage.label_windows(conn, healthy_ranges, "healthy")
+    n_worn = storage.label_windows(conn, worn_ranges, "worn")
+    if not n_healthy:
+        raise SystemExit("no windows fall inside --healthy-range")
+    if not n_worn:
+        raise SystemExit("no windows fall inside --worn-range")
+
+    print(f"labeled {n_healthy} window(s) healthy, {n_worn} window(s) worn")
 
 
-def auto_split_ranges(conn, device_id):
-    """Fallback for when no --healthy-range/--worn-range is given: split
-    every analyzed window for device_id in half by time, earlier half
-    labeled healthy and later half worn.
-
-    This is a dev/testing convenience, not a substitute for real recorded
-    sessions -- device_id alone can't tell belt condition (see module
-    docstring), so this only makes sense for a session where the belt was
-    swapped partway through a single recording run."""
-    start, end = conn.execute(
-        "SELECT MIN(r.received_at), MAX(r.received_at) FROM raw_windows r "
-        "JOIN fft_results f ON f.window_id = r.id WHERE r.device_id = ?",
-        (device_id,),
-    ).fetchone()
-    if start is None:
-        raise SystemExit(f"no fft_results found for device_id={device_id!r}; can't auto-split by time")
-    mid = (start + end) / 2
-    return [(start, mid)], [(mid, end)]
-
-
-def resolve_device_id(conn, table, explicit=None, flag_hint=None):
-    """Return `explicit` if given; otherwise auto-detect it as the sole
-    distinct device_id in `table`, erroring out if there's more than one
-    (ambiguous -- the caller must say which device they mean). `explicit`
-    only ever comes from callers that expose a --device-id flag; pass that
-    flag's name as `flag_hint` so the ambiguity error tells the user how to
-    resolve it (callers without the flag, e.g. generate_figures.py, leave
-    it None and rely solely on auto-detection)."""
-    if explicit:
-        return explicit
-    rows = conn.execute(f"SELECT DISTINCT device_id FROM {table}").fetchall()
-    if len(rows) != 1:
-        ids = ", ".join(r[0] for r in rows) or "(none)"
-        suffix = f"; pass {flag_hint} explicitly" if flag_hint else ""
-        raise SystemExit(
-            f"{table} has {len(rows)} distinct device_id(s) ({ids}), not exactly 1; can't auto-detect which device to use{suffix}"
-        )
-    return rows[0][0]
+if __name__ == "__main__":
+    main()

@@ -63,10 +63,10 @@ def run_once(conn, limit):
 
     for window in windows:
         result, peak = analyze_window(window)
-        storage.store_fft_result(conn, window["window_id"], window["device_id"], result, peak)
+        storage.store_fft_result(conn, window["window_id"], result, peak)
         log.info(
-            "window_id=%d device=%s peak=%.1fHz (%s) amp=%.3f",
-            window["window_id"], window["device_id"], peak[1], peak[0], peak[2],
+            "window_id=%d peak=%.1fHz (%s) amp=%.3f",
+            window["window_id"], peak[1], peak[0], peak[2],
         )
 
     return len(windows)

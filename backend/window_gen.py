@@ -23,12 +23,12 @@ same entrypoint ingest.py uses, so downstream scripts can't tell them from
 real hardware data.
 
 Usage:
-    python3 window_gen.py --device-id esp32-4a3f2c --condition healthy --count 200
-    python3 window_gen.py --device-id esp32-4a3f2c --condition worn --count 200
+    python3 window_gen.py --condition healthy --count 200
+    python3 window_gen.py --condition worn --count 200
 
 Each invocation's windows are timestamped at generation time (like real
 ingestion), so running healthy then worn as separate invocations produces
-two naturally-separated time ranges -- suitable for classify_faults.py's
+two naturally-separated time ranges -- suitable for analysis/labels.py's
 --healthy-range/--worn-range.
 """
 
@@ -127,7 +127,6 @@ def generate_window(condition, rng):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device-id", required=True, help="device_id to tag generated windows with")
     parser.add_argument("--condition", choices=("healthy", "worn"), required=True,
                          help="which belt condition to simulate")
     parser.add_argument("--count", type=int, required=True, help="number of windows to generate")
@@ -139,10 +138,10 @@ def main():
 
     for _ in range(args.count):
         window = generate_window(args.condition, rng)
-        window_id = storage.store_window(conn, args.device_id, window)
-        log.info("device=%s condition=%s stored window_id=%d", args.device_id, args.condition, window_id)
+        window_id = storage.store_window(conn, window)
+        log.info("condition=%s stored window_id=%d", args.condition, window_id)
 
-    log.info("wrote %d %s window(s) for device=%s to %s", args.count, args.condition, args.device_id, DB_PATH)
+    log.info("wrote %d %s window(s) to %s", args.count, args.condition, DB_PATH)
 
 
 if __name__ == "__main__":

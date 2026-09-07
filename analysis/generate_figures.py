@@ -7,26 +7,18 @@ analysis/figures/. Nothing here is interactive: matplotlib for the plots,
 scipy.stats for a real significance test on the healthy/worn separation,
 output committed as static images for the README.
 
-Healthy vs. worn windows come from one device_id, split by which
---healthy-range / --worn-range a window's timestamp falls in (see
-analysis/labels.py) -- device_id itself doesn't encode belt condition.
---healthy-range/--worn-range are optional; when both are omitted, every
-analyzed window for the device is split in half by time (earlier half
-healthy, later half worn) as a dev/testing convenience -- pass explicit
-ranges for a real report.
+Healthy vs. worn windows are whichever the `window_labels` table says they
+are -- run analysis/labels.py first to populate it from operator-recorded
+session time ranges.
 
 Usage:
-    python3 generate_figures.py
-
-    python3 generate_figures.py \\
+    python3 labels.py \\
         --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
         --worn-range 2026-08-22T09:00 2026-08-22T11:00
+    python3 generate_figures.py
 """
 
-import argparse
-import json
 import os
-import sqlite3
 import sys
 
 import matplotlib
@@ -35,8 +27,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import labels  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+import storage  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
@@ -48,44 +40,19 @@ HEALTHY_COLOR = "#2a78d6"
 WORN_COLOR = "#d03b3b"
 
 
-def fetch_window(conn, device_id, ranges):
-    """First window for device_id inside any of `ranges`, raw + full spectrum
-    (all three axes), joined."""
-    for start, end in ranges:
-        row = conn.execute(
-            "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ax, f.fft_ay, f.fft_az, "
-            "f.peak_axis, f.peak_freq_hz, f.peak_amp "
-            "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
-            "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id LIMIT 1",
-            (device_id, start, end),
-        ).fetchone()
-        if row is not None:
-            return {
-                "sample_rate_hz": row[0],
-                "ay": json.loads(row[1]),
-                "freq_hz": json.loads(row[2]),
-                "fft_ax": json.loads(row[3]),
-                "fft_ay": json.loads(row[4]),
-                "fft_az": json.loads(row[5]),
-                "peak_axis": row[6],
-                "peak_freq_hz": row[7],
-                "peak_amp": row[8],
-            }
-    raise SystemExit(f"no windows found for device_id={device_id!r} in the given range(s)")
+def fetch_window(conn, label):
+    """First window labeled `label`, raw + full spectrum (all three axes),
+    joined."""
+    window = storage.fetch_window_by_label(conn, label)
+    if window is None:
+        raise SystemExit(f"no windows labeled {label!r}; run analysis/labels.py first")
+    return window
 
 
-def fetch_series(conn, device_id, ranges):
-    peak_freq, peak_amp = [], []
-    for start, end in ranges:
-        rows = conn.execute(
-            "SELECT f.peak_freq_hz, f.peak_amp FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
-            "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id",
-            (device_id, start, end),
-        ).fetchall()
-        peak_freq.extend(r[0] for r in rows)
-        peak_amp.extend(r[1] for r in rows)
+def fetch_series(conn, label):
+    peak_freq, peak_amp = storage.fetch_series_by_label(conn, label)
     if not peak_freq:
-        raise SystemExit(f"no fft_results found for device_id={device_id!r} in the given range(s)")
+        raise SystemExit(f"no windows labeled {label!r}; run analysis/labels.py first")
     return np.array(peak_freq), np.array(peak_amp)
 
 
@@ -258,32 +225,13 @@ def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    labels.add_range_args(parser)
-    args = parser.parse_args()
-
     os.makedirs(FIG_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = storage.connect(DB_PATH)
 
-    device_id = labels.resolve_device_id(conn, "fft_results", None)
-    healthy_ranges = labels.parse_ranges(args.healthy_range)
-    worn_ranges = labels.parse_ranges(args.worn_range)
-    if not healthy_ranges and not worn_ranges:
-        healthy_ranges, worn_ranges = labels.auto_split_ranges(conn, device_id)
-        print(
-            "no --healthy-range/--worn-range given; auto-splitting "
-            f"device_id={device_id!r}'s windows in half by time "
-            "(dev convenience -- pass explicit ranges for a real report)"
-        )
-    elif not healthy_ranges:
-        raise SystemExit("--worn-range given without --healthy-range (repeatable), e.g. --healthy-range 2026-08-20T09:00 2026-08-20T11:00")
-    elif not worn_ranges:
-        raise SystemExit("--healthy-range given without --worn-range (repeatable), e.g. --worn-range 2026-08-22T09:00 2026-08-22T11:00")
-
-    h_window = fetch_window(conn, device_id, healthy_ranges)
-    w_window = fetch_window(conn, device_id, worn_ranges)
-    h_freq, h_amp = fetch_series(conn, device_id, healthy_ranges)
-    w_freq, w_amp = fetch_series(conn, device_id, worn_ranges)
+    h_window = fetch_window(conn, "healthy")
+    w_window = fetch_window(conn, "worn")
+    h_freq, h_amp = fetch_series(conn, "healthy")
+    w_freq, w_amp = fetch_series(conn, "worn")
 
     plot_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_comparison.png"))
     plot_full_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_full.png"))

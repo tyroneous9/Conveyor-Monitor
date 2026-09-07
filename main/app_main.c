@@ -8,9 +8,8 @@
  *      FreeRTOS tick -- see the comment on sample_timer) into a small pool
  *      of window buffers, handed off to a separate publish task over a pair
  *      of FreeRTOS queues (see the comment on free_buffer_queue), which publishes
- *      each full window as one JSON message to
- *      sensors/<device_id>/vibration/raw. See backend/ingest.py for the
- *      consumer side of this exact contract.
+ *      each full window as one JSON message to sensors/vibration/raw. See
+ *      backend/ingest.py for the consumer side of this exact contract.
  */
 
 #include <stdarg.h>
@@ -21,7 +20,6 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -44,6 +42,8 @@ static const char *TAG = "conveyor_monitor";
  * silently become too small if WINDOW_SIZE changes. */
 #define JSON_BUFFER_SIZE (WINDOW_SIZE * 3 * 20 + 128)
 
+#define VIBRATION_TOPIC "sensors/vibration/raw"
+
 typedef struct {
     float ax[WINDOW_SIZE];
     float ay[WINDOW_SIZE];
@@ -53,7 +53,6 @@ typedef struct {
 static esp_mqtt_client_handle_t mqtt_client;
 static volatile bool mqtt_is_connected;
 static mpu6050_handle_t mpu6050_sensor;
-static char device_topic[64];
 static esp_timer_handle_t sample_timer;
 static char window_json_buf[JSON_BUFFER_SIZE];
 
@@ -135,20 +134,6 @@ static void mqtt_app_start(void)
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
-}
-
-/* Fills device_topic with sensors/esp32-<last 3 MAC bytes>/vibration/raw,
- * so each device publishes to its own topic without any manual per-device
- * configuration. */
-static void build_device_topic(void)
-{
-    uint8_t mac[6] = {0};
-    esp_err_t err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_read_mac failed: %s, using a placeholder device id", esp_err_to_name(err));
-    }
-    snprintf(device_topic, sizeof(device_topic),
-             "sensors/esp32-%02x%02x%02x/vibration/raw", mac[3], mac[4], mac[5]);
 }
 
 /* Formats one more piece of text into `buf` at `offset` (printf-style).
@@ -252,14 +237,14 @@ static void publish_task(void *arg)
          * QoS 1 the client queues into its outbox (bounded by
          * OUTBOX_LIMIT_BYTES above) and flushes it on reconnect, so a brief
          * drop no longer means a silently lost window. */
-        int msg_id = esp_mqtt_client_publish(mqtt_client, device_topic, window_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
+        int msg_id = esp_mqtt_client_publish(mqtt_client, VIBRATION_TOPIC, window_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
         if (msg_id == MQTT_PUBLISH_OUTBOX_FULL) {
             ESP_LOGW(TAG, "Outbox full, dropping window (broker unreachable too long)");
         } else if (!mqtt_is_connected) {
             ESP_LOGI(TAG, "Queued %d-sample window for %s while disconnected (outbox=%d bytes)",
-                     WINDOW_SIZE, device_topic, esp_mqtt_client_get_outbox_size(mqtt_client));
+                     WINDOW_SIZE, VIBRATION_TOPIC, esp_mqtt_client_get_outbox_size(mqtt_client));
         } else {
-            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, device_topic, (int)len);
+            ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, VIBRATION_TOPIC, (int)len);
         }
 
         // Return buffer to free pool so sample_timer_cb can check it out again
@@ -315,8 +300,6 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    build_device_topic();
 
     const mpu6050_config_t mpu6050_cfg = {
         .sda_io_num = CONFIG_MPU6050_SDA_GPIO,
