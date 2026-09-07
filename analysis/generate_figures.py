@@ -44,10 +44,12 @@ WORN_COLOR = "#d03b3b"
 
 
 def fetch_window(conn, device_id, ranges):
-    """First window for device_id inside any of `ranges`, raw + spectrum, joined."""
+    """First window for device_id inside any of `ranges`, raw + full spectrum
+    (all three axes), joined."""
     for start, end in ranges:
         row = conn.execute(
-            "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ay, f.peak_freq_hz, f.peak_amp "
+            "SELECT r.sample_rate_hz, r.ay, f.freq_hz, f.fft_ax, f.fft_ay, f.fft_az, "
+            "f.peak_axis, f.peak_freq_hz, f.peak_amp "
             "FROM raw_windows r JOIN fft_results f ON f.window_id = r.id "
             "WHERE r.device_id = ? AND r.received_at BETWEEN ? AND ? ORDER BY r.id LIMIT 1",
             (device_id, start, end),
@@ -57,9 +59,12 @@ def fetch_window(conn, device_id, ranges):
                 "sample_rate_hz": row[0],
                 "ay": json.loads(row[1]),
                 "freq_hz": json.loads(row[2]),
-                "fft_ay": json.loads(row[3]),
-                "peak_freq_hz": row[4],
-                "peak_amp": row[5],
+                "fft_ax": json.loads(row[3]),
+                "fft_ay": json.loads(row[4]),
+                "fft_az": json.loads(row[5]),
+                "peak_axis": row[6],
+                "peak_freq_hz": row[7],
+                "peak_amp": row[8],
             }
     raise SystemExit(f"no windows found for device_id={device_id!r} in the given range(s)")
 
@@ -79,35 +84,78 @@ def fetch_series(conn, device_id, ranges):
     return np.array(peak_freq), np.array(peak_amp)
 
 
+def _cutoff_index(freq_hz, max_hz):
+    """Index one past the first bin exceeding max_hz, or the full length if
+    every bin is <= max_hz (e.g. Nyquist itself is below max_hz)."""
+    return next((i for i, f in enumerate(freq_hz) if f > max_hz), len(freq_hz) - 1) + 1
+
+
 def plot_spectrum(h, w, out_path):
     """Overlay one healthy and one worn window's frequency spectrum (up to
     100Hz) so the belt-pass peak's growth is directly visible."""
     fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
-    cutoff = next(i for i, f in enumerate(h["freq_hz"]) if f > 100) + 1
+    h_cutoff = _cutoff_index(h["freq_hz"], 100)
+    w_cutoff = _cutoff_index(w["freq_hz"], 100)
 
-    ax.plot(h["freq_hz"][:cutoff], h["fft_ay"][:cutoff], color=HEALTHY_COLOR, lw=1.8,
+    ax.plot(h["freq_hz"][:h_cutoff], h["fft_ay"][:h_cutoff], color=HEALTHY_COLOR, lw=1.8,
             label=f"Healthy (peak {h['peak_freq_hz']:.1f} Hz, {h['peak_amp']:.2f} g)")
-    ax.fill_between(h["freq_hz"][:cutoff], h["fft_ay"][:cutoff], color=HEALTHY_COLOR, alpha=0.12)
+    ax.fill_between(h["freq_hz"][:h_cutoff], h["fft_ay"][:h_cutoff], color=HEALTHY_COLOR, alpha=0.12)
 
-    ax.plot(w["freq_hz"][:cutoff], w["fft_ay"][:cutoff], color=WORN_COLOR, lw=1.8,
+    ax.plot(w["freq_hz"][:w_cutoff], w["fft_ay"][:w_cutoff], color=WORN_COLOR, lw=1.8,
             label=f"Worn (peak {w['peak_freq_hz']:.1f} Hz, {w['peak_amp']:.2f} g)")
-    ax.fill_between(w["freq_hz"][:cutoff], w["fft_ay"][:cutoff], color=WORN_COLOR, alpha=0.12)
+    ax.fill_between(w["freq_hz"][:w_cutoff], w["fft_ay"][:w_cutoff], color=WORN_COLOR, alpha=0.12)
 
+    # xytext in "offset points" (not data coords, unlike the original) so the
+    # label sits a fixed distance from its peak regardless of the axes'
+    # scale -- data-coord offsets could (and did) land the text outside the
+    # y-range entirely, rendering it disconnected in blank space above the
+    # plot instead of near the peak it annotates.
     ax.annotate(f"{w['peak_freq_hz']:.1f} Hz\nbelt-pass, dominant",
-                xy=(w["peak_freq_hz"], w["peak_amp"]), xytext=(w["peak_freq_hz"] + 6, w["peak_amp"]),
-                fontsize=9, color=WORN_COLOR, va="center")
+                xy=(w["peak_freq_hz"], w["peak_amp"]), xytext=(30, 10), textcoords="offset points",
+                fontsize=9, color=WORN_COLOR, va="center",
+                arrowprops=dict(arrowstyle="-", color=WORN_COLOR, lw=0.8))
     ax.annotate(f"{h['peak_freq_hz']:.1f} Hz\nmotor fundamental",
-                xy=(h["peak_freq_hz"], h["peak_amp"]), xytext=(h["peak_freq_hz"] + 6, h["peak_amp"] + 2),
-                fontsize=9, color=HEALTHY_COLOR, va="center")
+                xy=(h["peak_freq_hz"], h["peak_amp"]), xytext=(30, 10), textcoords="offset points",
+                fontsize=9, color=HEALTHY_COLOR, va="center",
+                arrowprops=dict(arrowstyle="-", color=HEALTHY_COLOR, lw=0.8))
 
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Amplitude (g)")
     ax.set_title("Frequency spectrum: healthy vs. worn belt")
     ax.set_xlim(0, 100)
+    ax.set_ylim(top=ax.get_ylim()[1] * 1.15)  # headroom so peak-near-top annotations clear the title
     ax.legend(frameon=False, loc="upper right")
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#e1e0d9", lw=0.8)
     ax.set_axisbelow(True)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_full_spectrum(h, w, out_path):
+    """Full frequency spectrum (0 Hz to Nyquist, all three axes) as computed
+    by backend/analyze_fft.py, unlike plot_spectrum which shows only ay
+    clipped to 100Hz. Log-scale amplitude since the full range spans several
+    orders of magnitude."""
+    fig, axes = plt.subplots(3, 1, figsize=(9, 8), dpi=150, sharex=True)
+
+    for ax, axis_key, axis_label in zip(axes, ("fft_ax", "fft_ay", "fft_az"), ("ax", "ay", "az")):
+        ax.plot(h["freq_hz"], h[axis_key], color=HEALTHY_COLOR, lw=1.2, label="Healthy")
+        ax.plot(w["freq_hz"], w[axis_key], color=WORN_COLOR, lw=1.2, label="Worn")
+        ax.set_yscale("log")
+        ax.set_ylabel(f"{axis_label} (g)")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", which="major", color="#e1e0d9", lw=0.8)
+        ax.set_axisbelow(True)
+
+    nyquist_h = h["sample_rate_hz"] / 2
+    axes[0].set_title(
+        f"Full frequency spectrum (0-{nyquist_h:.0f} Hz Nyquist, all axes, log amplitude)"
+    )
+    axes[0].legend(frameon=False, loc="upper right")
+    axes[-1].set_xlabel("Frequency (Hz)")
+    axes[-1].set_xlim(0, nyquist_h)
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -226,6 +274,7 @@ def main():
     w_freq, w_amp = fetch_series(conn, device_id, worn_ranges)
 
     plot_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_comparison.png"))
+    plot_full_spectrum(h_window, w_window, os.path.join(FIG_DIR, "spectrum_full.png"))
     plot_waveform(h_window, w_window, os.path.join(FIG_DIR, "waveform_comparison.png"))
     plot_repeatability(h_freq, h_amp, w_freq, w_amp, os.path.join(FIG_DIR, "repeatability.png"))
     table_lines = write_summary_table(h_freq, h_amp, w_freq, w_amp, os.path.join(FIG_DIR, "summary_table.md"))

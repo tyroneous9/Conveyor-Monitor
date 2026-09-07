@@ -30,11 +30,8 @@ log = logging.getLogger("analyze_fft")
 
 
 def compute_spectrum(sample_rate_hz, samples):
-    """One axis's time-domain samples -> (frequency bins, magnitude
-    spectrum). mean-subtract removes the DC offset (gravity) so it doesn't
-    dominate the FFT; the Hann window tapers the edges of the (non-periodic)
-    sample window to reduce spectral leakage; rfft exploits the input being
-    real-valued to skip the redundant negative-frequency half."""
+    """Input one axis' samples and output its frequency spectrum. 
+    The Hann window smooths the edges of the windows."""
     n_samples = len(samples)
     windowed = (samples - np.mean(samples)) * np.hanning(n_samples)
     spectrum = np.abs(np.fft.rfft(windowed))
