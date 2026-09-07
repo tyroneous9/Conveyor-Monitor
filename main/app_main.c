@@ -27,7 +27,6 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
-#include "esp_crt_bundle.h"
 #include "mpu6050.h"
 #include "mqtt_client.h"
 #include "protocol_examples_common.h"
@@ -112,14 +111,13 @@ static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
-        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
         /* Default buffer is sized for small example payloads, not a whole
          * JSON sample window -- match it to what we actually send. */
         .buffer.size = JSON_BUFFER_SIZE,
         /* Default is 120s; the network here is a phone hotspot, which can
          * idle-timeout/drop the radio to save battery -- keep traffic
-         * frequent enough that it doesn't look idle (see TODO.md). The
-         * client pings at roughly half this interval. */
+         * frequent enough that it doesn't look idle. The client pings at
+         * roughly half this interval. */
         .session.keepalive = 30,
         /* QoS 1 publishes queue in this outbox and get resent on reconnect
          * (auto-reconnect is on by default) instead of being dropped the

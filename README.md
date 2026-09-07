@@ -24,8 +24,9 @@ flowchart LR
     Ingest -->|raw_windows| DB[("SQLite")]
     DB -->|unanalyzed windows| Analyze["analyze_fft.py"]
     Analyze -->|fft_results| DB
-    DB -->|fft_results| Classify["classify_faults.py"]
-    Classify -->|classifications| DB
+    Labels["labels.py<br/>(operator session ranges)"] -->|window_labels| DB
+    DB -->|fft_results + window_labels| Classify["classify_faults.py"]
+    Classify -->|baselines, classifications| DB
 ```
 
 **Explanation:**
@@ -42,9 +43,11 @@ flowchart LR
 
 4. `analyze_fft.py` is used to analyze the data given enough windows. It performs FFT and writes the results into `fft_results`.
 
-5. `classify_faults.py` reads the FFT results and classifies any new window healthy or worn by comparing the vibration against a baseline from known-healthy windows. Results get saved to the database (`baselines` and `classifications` tables).
+5. `analysis/labels.py` labels each recorded window healthy or worn from operator-recorded session time ranges (the belt is moved between a known-healthy and known-worn setup between recording sessions, so ground truth comes from which session's time range a window falls in). Labels are written to the `window_labels` table and must be populated before classification can run.
 
-6. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data manually.
+6. `classify_faults.py` reads the FFT results and labels, and classifies any new window healthy or worn by comparing the vibration against a baseline from known-healthy windows. Results get saved to the database (`baselines` and `classifications` tables).
+
+7. `analysis/explore_spectra.ipynb` is a Jupyter notebook for checking the data manually.
 
 ## Repo layout
 
@@ -52,7 +55,7 @@ flowchart LR
 main/            ESP-IDF firmware: fixed-rate sampling, window buffering, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
-analysis/        Report figures, the classifier, Notebook
+analysis/        labels.py, the classifier, report figures, Notebook
 deploy/          Mosquitto config + systemd unit for running the broker and ingest.py as persistent services on the Pi
 ```
 
@@ -63,6 +66,10 @@ I ran `backend/analyze_fft.py` on 700 windows split between healthy and worn. Th
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
 
 The worn belt shows an obvious peak at its belt-pass frequency while the motor's own rotation frequency (29.3Hz) barely changes between conditions.
+
+![Full frequency spectrum, all axes, healthy vs. worn](analysis/figures/spectrum_full.png)
+
+The same comparison across the full 0Hz-to-Nyquist range and all three axes (log amplitude), showing the belt-pass difference isn't an artifact of the 100Hz cutoff or the single axis (`ay`) used above.
 
 ![Raw time-domain signal, healthy vs. worn](analysis/figures/waveform_comparison.png)
 

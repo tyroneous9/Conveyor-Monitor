@@ -43,7 +43,7 @@ menu "Example Configuration"
             CONFIG_FREERTOS_HZ=100 is too coarse for rates like this).
             Should eventually be picked against Nyquist once target
             mechanical frequencies (motor RPM, belt-pass frequency) are
-            known -- see TODO.md.
+            known.
 
     config SAMPLE_WINDOW_SIZE
         int "Samples per published window"

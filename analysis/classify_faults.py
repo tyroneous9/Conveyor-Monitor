@@ -2,18 +2,13 @@
 """Threshold-based fault classifier: does a window's spectrum look like the
 healthy baseline, or does it look worn?
 
-Deliberately the *simplest* thing in README §4's own staged progression --
-"1. Threshold/anomaly detection on one or two features... 2. Statistical
-anomaly detection... if thresholds prove too brittle... 3. Supervised
-classification... only once you have labeled examples". A fancier model
-would fit the quirks of the belt/load/speed combination it's trained on
-just as confidently as a threshold does, just less visibly -- a black-box
-model's weights don't announce that they're overfit. This stays
-interpretable: one feature (summed FFT amplitude in a band around the
-belt-pass frequency), one threshold (baseline mean + N standard
-deviations), recalibratable as more sessions get recorded -- a number
-change, not a retrain. Steps 2/3 remain available later if this proves too
-brittle.
+Deliberately the simplest approach that could work: a fancier model would
+fit the quirks of the belt/load/speed combination it's trained on just as
+confidently as a threshold does, just less visibly -- a black-box model's
+weights don't announce that they're overfit. This stays interpretable: one
+feature (summed FFT amplitude in a band around the belt-pass frequency),
+one threshold (baseline mean + N standard deviations), recalibratable as
+more sessions get recorded -- a number change, not a retrain.
 
 Ground truth comes from operator-recorded recording sessions, labeled into
 the `window_labels` table by analysis/labels.py -- run that first (it
