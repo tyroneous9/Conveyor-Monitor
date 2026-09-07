@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""Batch FFT analysis: reads raw accel windows from SQLite, computes spectra.
+"""Batch FFT analysis: reads raw accel windows from SQLite, computes FFT.
 
-Deliberately separate from ingestion (ingest.py) -- this script never
-touches MQTT. It reads windows that don't have a matching fft_results row
-yet (storage.fetch_unanalyzed_windows), computes a spectrum per axis
-(mean-subtract, Hann window, rfft -- README §4), and writes each result to
-the fft_results table.
-
-Run it whenever you want to catch up on analysis -- after a recording
-session, by hand, or continuously with --watch. It's idempotent:
-already-analyzed windows are skipped, so re-running (or overlapping runs)
-is always safe.
+Reads windows that don't have a matching fft_results row yet and writes the analysis to fft_results.
 
 Usage:
-    pip install -r requirements.txt
     FFT_DB_PATH=<path> python3 analyze_fft.py [--limit N]
     FFT_DB_PATH=<path> python3 analyze_fft.py --watch 30   # loop every 30s
 """
