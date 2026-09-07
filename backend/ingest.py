@@ -34,7 +34,7 @@ BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
 # processes (e.g. one as a long-running service, the other from cron), and a
 # bare relative filename would silently point them at two different files if
 # they're started from different working directories.
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_backend.sqlite3")
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_db.sqlite3")
 DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 # Stable, not the paho-generated random default: a persistent session (see
 # clean_session=False in main()) is only useful if the broker recognizes the

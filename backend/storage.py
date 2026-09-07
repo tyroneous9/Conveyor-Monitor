@@ -98,8 +98,9 @@ def store_window(conn, device_id, payload, received_at=None):
     return cur.lastrowid
 
 
-def fetch_unanalyzed_windows(conn, limit=100):
-    """Raw windows that don't have a matching fft_results row yet."""
+def fetch_unanalyzed_windows(conn, limit=None):
+    """Raw windows that don't have a matching fft_results row yet.
+    `limit=None` fetches all of them (SQLite's LIMIT -1 means unbounded)."""
     cur = conn.execute(
         "SELECT r.id, r.device_id, r.sample_rate_hz, r.ax, r.ay, r.az "
         "FROM raw_windows r "
@@ -107,7 +108,7 @@ def fetch_unanalyzed_windows(conn, limit=100):
         "WHERE f.id IS NULL "
         "ORDER BY r.id "
         "LIMIT ?",
-        (limit,),
+        (limit if limit is not None else -1,),
     )
     return [
         {

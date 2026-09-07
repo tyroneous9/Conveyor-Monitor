@@ -23,8 +23,8 @@ same entrypoint ingest.py uses, so downstream scripts can't tell them from
 real hardware data.
 
 Usage:
-    python3 window_gen.py --device-id sim-01 --condition healthy --count 200
-    python3 window_gen.py --device-id sim-01 --condition worn --count 200
+    python3 window_gen.py --device-id esp32-4a3f2c --condition healthy --count 200
+    python3 window_gen.py --device-id esp32-4a3f2c --condition worn --count 200
 
 Each invocation's windows are timestamped at generation time (like real
 ingestion), so running healthy then worn as separate invocations produces
@@ -42,7 +42,7 @@ import storage
 
 # Anchored to this script's own directory -- see the matching comment in
 # ingest.py/analyze_fft.py.
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_backend.sqlite3")
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_db.sqlite3")
 DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 
 SAMPLE_RATE_HZ = 500.0

@@ -5,7 +5,7 @@ Reads windows that don't have a matching fft_results row yet and writes the anal
 
 Usage:
     FFT_DB_PATH=<path> python3 analyze_fft.py [--limit N]
-    FFT_DB_PATH=fft_backend.sqlite3 python3 analyze_fft.py
+    FFT_DB_PATH=fft_db.sqlite3 python3 analyze_fft.py
 """
 
 import argparse
@@ -20,7 +20,7 @@ import storage
 # matching comment in ingest.py. ingest.py and analyze_fft.py must resolve
 # to the same file even when launched independently (e.g. one as a service,
 # the other from cron) with different working directories.
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_backend.sqlite3")
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fft_db.sqlite3")
 DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 AXES = ("ax", "ay", "az")
 
@@ -74,7 +74,7 @@ def run_once(conn, limit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=100, help="max windows to process per run")
+    parser.add_argument("--limit", type=int, default=None, help="max windows to process per run; default: no limit")
     args = parser.parse_args()
 
     conn = storage.connect(DB_PATH)

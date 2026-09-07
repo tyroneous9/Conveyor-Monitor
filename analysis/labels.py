@@ -18,11 +18,7 @@ def parse_ts(s):
         return datetime.fromisoformat(s).timestamp()
 
 
-def add_session_args(parser):
-    parser.add_argument(
-        "--device-id", default=None,
-        help="physical device to read from; default: the only device_id present in fft_results (error if there's more than one)",
-    )
+def add_range_args(parser):
     parser.add_argument(
         "--healthy-range", nargs=2, metavar=("START", "END"), action="append", default=None,
         help="a time range (unix timestamp or ISO 8601) the belt was known healthy; repeatable for "
@@ -35,6 +31,14 @@ def add_session_args(parser):
              "multiple sessions. Optional if --healthy-range is also omitted: windows are then "
              "auto-split in half by time instead",
     )
+
+
+def add_session_args(parser):
+    parser.add_argument(
+        "--device-id", default=None,
+        help="physical device to read from; default: the only device_id present in fft_results (error if there's more than one)",
+    )
+    add_range_args(parser)
 
 
 def parse_ranges(raw_ranges):
@@ -73,16 +77,21 @@ def auto_split_ranges(conn, device_id):
     return [(start, mid)], [(mid, end)]
 
 
-def resolve_device_id(conn, table, explicit):
+def resolve_device_id(conn, table, explicit=None, flag_hint=None):
     """Return `explicit` if given; otherwise auto-detect it as the sole
     distinct device_id in `table`, erroring out if there's more than one
-    (ambiguous -- the caller must say which device they mean)."""
+    (ambiguous -- the caller must say which device they mean). `explicit`
+    only ever comes from callers that expose a --device-id flag; pass that
+    flag's name as `flag_hint` so the ambiguity error tells the user how to
+    resolve it (callers without the flag, e.g. generate_figures.py, leave
+    it None and rely solely on auto-detection)."""
     if explicit:
         return explicit
     rows = conn.execute(f"SELECT DISTINCT device_id FROM {table}").fetchall()
     if len(rows) != 1:
         ids = ", ".join(r[0] for r in rows) or "(none)"
+        suffix = f"; pass {flag_hint} explicitly" if flag_hint else ""
         raise SystemExit(
-            f"--device-id not given and {table} has {len(rows)} distinct device_id(s) ({ids}); pass --device-id explicitly"
+            f"{table} has {len(rows)} distinct device_id(s) ({ids}), not exactly 1; can't auto-detect which device to use{suffix}"
         )
     return rows[0][0]

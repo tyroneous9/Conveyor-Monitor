@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate static report figures + a summary table from fft_results.
 
-Reads backend/fft_backend.sqlite3 (real output of backend/analyze_fft.py)
+Reads backend/fft_db.sqlite3 (real output of backend/analyze_fft.py)
 and writes plain PNG plots plus a markdown summary table to
 analysis/figures/. Nothing here is interactive: matplotlib for the plots,
 scipy.stats for a real significance test on the healthy/worn separation,
@@ -16,9 +16,9 @@ healthy, later half worn) as a dev/testing convenience -- pass explicit
 ranges for a real report.
 
 Usage:
-    python3 generate_figures.py --device-id sim01
+    python3 generate_figures.py
 
-    python3 generate_figures.py --device-id sim01 \\
+    python3 generate_figures.py \\
         --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
         --worn-range 2026-08-22T09:00 2026-08-22T11:00
 """
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import labels  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_backend.sqlite3"
+    os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
 )
 DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 FIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
@@ -259,13 +259,13 @@ def write_summary_table(h_freq, h_amp, w_freq, w_amp, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    labels.add_session_args(parser)
+    labels.add_range_args(parser)
     args = parser.parse_args()
 
     os.makedirs(FIG_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
 
-    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id)
+    device_id = labels.resolve_device_id(conn, "fft_results", None)
     healthy_ranges = labels.parse_ranges(args.healthy_range)
     worn_ranges = labels.parse_ranges(args.worn_range)
     if not healthy_ranges and not worn_ranges:

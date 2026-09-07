@@ -56,7 +56,7 @@ import storage  # noqa: E402  (reuses the schema + write functions rather than d
 import labels  # noqa: E402
 
 DEFAULT_DB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_backend.sqlite3"
+    os.path.dirname(os.path.abspath(__file__)), "..", "backend", "fft_db.sqlite3"
 )
 DB_PATH = os.environ.get("FFT_DB_PATH", DEFAULT_DB_PATH)
 FIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
@@ -205,7 +205,7 @@ def main():
     os.makedirs(FIG_DIR, exist_ok=True)
     conn = storage.connect(DB_PATH)
 
-    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id)
+    device_id = labels.resolve_device_id(conn, "fft_results", args.device_id, flag_hint="--device-id")
     healthy_ranges = labels.parse_ranges(args.healthy_range)
     worn_ranges = labels.parse_ranges(args.worn_range)
     if not healthy_ranges:
