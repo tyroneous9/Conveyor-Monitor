@@ -17,8 +17,8 @@ and new sessions.
 
 Usage:
     python3 labels.py \\
-        --healthy-range 2026-08-20T09:00 2026-08-20T11:00 \\
-        --worn-range 2026-08-22T09:00 2026-08-22T11:00
+        --healthy-range [datetime_start datetime_end] \\
+        --worn-range [datetime_start datetime_end]
 """
 
 import argparse

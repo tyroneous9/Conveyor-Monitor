@@ -117,16 +117,6 @@ The window size of 256 samples is specifically chosen for two reasons. First, th
 
     - Size tradeoffs: Increasing the size of the outbox increases the RAM usage. It is a non-issue in this case because testing was done on a dev board, but for a standalone ESP32 chip, the RAM usage of a large outbox is non-trivial considering the size of each window.
 
-## Current issues
-
-**1. Classification limitations:**
-A single window being classified as worn doesn't guarantee the belt is worn. It could've happened by chance or it may be a temporary fault. It is much more useful to see if there is a trend of worn windows which can be used to make more confident statements about belt wear.
-
-Another concern is that belt is unlikely to be the only fault in the conveyor belt. Belt wear was specifically investigated in this project only because it is audibly obvious and is easily fixed after diagnosis. Other faults may have not caused down time so far, but it is a possibility in the future.
-
-**2. PCB migration:**
-The sensor circuit currently runs on a breadboard with an ESP32 dev board. This was good for prototyping, but installing it along multiple places along the conveyor belt is not cheap nor efficient. A PCB would be ideal to cut power use and make mounting more practical.
-
 
 ## Setup
 
@@ -154,5 +144,32 @@ pip install -r requirements.txt
 python3 ingest.py
 python3 analyze_fft.py
 ```
-`analyze_fft.py` processes whatever unanalyzed windows exist and exits; run
-it again (e.g. from cron, or by hand) to pick up new ones.
+`analyze_fft.py` processes whatever windows are not analyzed yet, with an optional limit.
+
+**Analysis** (you have known set of healthy/worn data):
+```
+cd analysis
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python3 labels.py \
+    --healthy-range [datetime_start datetime_end] \
+    --worn-range [datetime_start datetime_end]
+python3 classify_faults.py
+python3 generate_figures.py
+```
+`labels.py` must run first to classify a set of data as healthy or worn based on their datetime range.
+
+
+## Current issues
+
+**1. Classification limitations:**
+A single window being classified as worn doesn't guarantee the belt is worn. It could've happened by chance or it may be a temporary fault. It is much more useful to see if there is a trend of worn windows which can be used to make more confident statements about belt wear.
+
+Another concern is that belt is unlikely to be the only fault in the conveyor belt. Belt wear was specifically investigated in this project only because it is audibly obvious and is easily fixed after diagnosis. Other faults may have not caused down time so far, but it is a possibility in the future.
+
+**2. No inference:**
+Currently the classifier only validates known healthy or worn data. It is unable to do inferences on unknown data.
+
+**3. PCB migration:**
+The sensor circuit currently runs on a breadboard with an ESP32 dev board. This was good for prototyping, but installing it along multiple places along the conveyor belt is not cheap nor efficient. A PCB would be ideal to cut power use and make mounting more practical.
