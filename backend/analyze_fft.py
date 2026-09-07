@@ -38,7 +38,7 @@ def compute_spectrum(sample_rate_hz, samples):
     return freq_hz, spectrum
 
 
-def analyze_window(window):
+def analyze_window_peak(window):
     """Compute a spectrum for each axis of one raw window and find the
     single largest peak across all three (skipping each axis's DC bin).
     Returns (result dict ready for storage.store_fft_result, peak tuple)."""
@@ -62,7 +62,7 @@ def run_once(conn, limit):
     log.info("found %d unanalyzed window(s) in %s", len(windows), DB_PATH)
 
     for window in windows:
-        result, peak = analyze_window(window)
+        result, peak = analyze_window_peak(window)
         storage.store_fft_result(conn, window["window_id"], result, peak)
         log.info(
             "window_id=%d peak=%.1fHz (%s) amp=%.3f",

@@ -61,11 +61,11 @@ deploy/          Mosquitto config + systemd unit for running the broker and inge
 
 ## Analysis results
 
-I ran `backend/analyze_fft.py` on 700 windows split between healthy and worn. These results are then plotted with `analysis/generate_figures.py`.
+I ran `backend/analyze_fft.py` on 1,075 windows (429 healthy, 646 worn). These results are then plotted with `analysis/generate_figures.py`.
 
 ![Frequency spectrum: healthy vs. worn belt](analysis/figures/spectrum_comparison.png)
 
-The worn belt shows an obvious peak at its belt-pass frequency while the motor's own rotation frequency (29.3Hz) barely changes between conditions.
+The worn belt shows an obvious peak at its belt-pass frequency (11.7Hz) while the motor's own rotation frequency (27.3Hz) barely changes between conditions.
 
 ![Full frequency spectrum, all axes, healthy vs. worn](analysis/figures/spectrum_full.png)
 
@@ -75,10 +75,10 @@ The same comparison across the full 0Hz-to-Nyquist range and all three axes (log
 
 ![Repeatability across independent windows](analysis/figures/repeatability.png)
 
-| Metric | Healthy (n=350) | Worn (n=350) | Mann-Whitney U |
+| Metric | Healthy (n=429) | Worn (n=646) | Mann-Whitney U |
 |---|---|---|---|
-| Peak frequency (Hz) | 28.49 ± 4.59 | 8.74 ± 3.98 | U=117736, p=2.10×10⁻¹¹³ |
-| Peak amplitude (g) | 2.19 ± 0.62 | 18.97 ± 6.15 | U=1482, p=1.43×10⁻¹¹⁰ |
+| Peak frequency (Hz) | 32.73 ± 30.44 | 10.95 ± 12.50 | U=248583, p=5.22×10⁻¹¹⁴ |
+| Peak amplitude (g) | 3.22 ± 4.04 | 17.52 ± 7.94 | U=17890, p=1.82×10⁻¹²⁹ |
 
 Mann-Whitney U (a statistical test for data that isn't normally distributed) was used because peak frequency clusters into a handful of discrete FFT bins. The tiny p-values mean the difference between the healthy and worn data is unlikely to be random.
 
@@ -91,10 +91,10 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 
 | | Predicted healthy | Predicted worn |
 |---|---|---|
-| **True healthy** | 100 | 6 |
-| **True worn** | 17 | 333 |
+| **True healthy** | 125 | 4 |
+| **True worn** | 219 | 427 |
 
-93.0% accuracy on the 456 held-out windows: 98.5% precision, meaning it catches most but not all of the actually-worn windows. There are some false negatives in identifying healthy windows as worn ones.
+71.2% accuracy on the 775 evaluated windows: 99.1% precision, but only 66.1% recall. Precision stays high (very few healthy windows get called worn), but a large share of worn windows (219 of 646) are missed as false negatives.
 
 ## Design decisions
 
