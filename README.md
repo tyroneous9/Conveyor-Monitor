@@ -96,7 +96,7 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 
 71.2% accuracy on the 775 evaluated windows: 99.1% precision, but only 66.1% recall. Precision stays high (very few healthy windows get called worn), but a large share of worn windows (219 of 646) are missed as false negatives.
 
-## Design decisions
+## Firmware design decisions
 
 **1. Sampling uses interrupts and a double buffer:**
 The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution. This means trying to sample at 500Hz (2ms) is impossible with such a delay, as it will be rounded up to 10ms minimum. In practice, sampling must be deferred to its own task.
@@ -125,9 +125,26 @@ The window size of 256 samples is specifically chosen for two reasons. First, th
 **4. Locally hosted broker:**
 My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
 
-**5. SQLite:**
-Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
 
+## Vibration analysis design decisions
+
+**1. Hann windowing before FFT:**
+`analyze_fft.py` applies a Hann window (`np.hanning`) to each axis before taking the FFT. A raw 256-sample window is not an integer number of vibration cycles, so the edges at its start and end act like a discontinuity. Smoothing the edges with a Hann window trades a small amount of frequency resolution for a much cleaner spectrum.
+
+**2. Band amplitude, not a single bin:**
+`classify_faults.py` sums FFT magnitude over a frequency band (`band_amplitude`) rather than reading the amplitude of a single bin. At 500Hz over 256 samples, each FFT bin is ~1.95Hz wide, so the true peak can jitter into an adjacent bin between windows. Summing a band around the expected frequency absorbs jitter at the cost of some frequency precision.
+
+**3. Classification uses only the `ay` axis:**
+`analyze_fft.py` stores spectra for `ax`, `ay`, and `az` on every window, but `classify_faults.py`'s band amplitude only reads `fft_ay`. `ay` is the axis most aligned with the conveyor's direction of travel, where belt-pass vibration showed up most strongly. All three axes are still stored so they could be used for other fault detections later on.
+
+**4. Threshold classification:**
+A statistical threshold is sufficient for the current implementation, but ideally should be changed to a trained model as data becomes more varied and different classifications are needed.
+
+**5. Windows are split chronologically:**
+Adjacent windows are highly correlated (they're 0.512s apart from the same few minutes of recording), so both evaluation and fitting sets use chronologically split data.
+
+**6. Session ranges are labeled manually:**
+`labels.py` is used to manually label data as "healthy" or "worn" based on timeframe. This is the only way to determine known sets of data to create a baseline.
 
 ## Setup
 
