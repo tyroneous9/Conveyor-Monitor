@@ -4,12 +4,13 @@
  * What this does:
  *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
  *   2. Connects to a plain (non-TLS) MQTT broker
- *   3. Samples the MPU6050 accelerometer at a fixed rate (esp_timer, not the
- *      FreeRTOS tick -- see the comment on sample_timer) into a small pool
- *      of window buffers, handed off to a separate publish task over a pair
- *      of FreeRTOS queues (see the comment on free_buffer_queue), which publishes
- *      each full window as one JSON message to sensors/vibration/raw. See
- *      backend/ingest.py for the consumer side of this exact contract.
+ *   3. Samples the MPU6050 accelerometer, driven by the sensor's own DATA_RDY
+ *      hardware interrupt (see mpu6050_int_isr_handler) rather than a
+ *      software timer, into a small pool of window buffers, handed off to a
+ *      separate publish task over a pair of FreeRTOS queues (see the comment
+ *      on free_buffer_queue), which publishes each full window as one JSON
+ *      message to sensors/vibration/raw. See backend/ingest.py for the
+ *      consumer side of this exact contract.
  */
 
 #include <stdarg.h>
@@ -18,10 +19,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -52,19 +53,19 @@ typedef struct {
 static esp_mqtt_client_handle_t mqtt_client;
 static volatile bool mqtt_is_connected;
 static mpu6050_handle_t mpu6050_sensor;
-static esp_timer_handle_t sample_timer;
+static TaskHandle_t sample_task_handle;
 static char window_json_buf[JSON_BUFFER_SIZE];
 
 /* A WINDOW_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
  * queues, so a slow MQTT publish (network I/O, in publish_task) never blocks
- * or delays the next sample due (in sample_timer_cb):
- *   - free_buffer_queue holds indices of buffers safe to fill. sample_timer_cb
+ * or delays the next sample due (in sample_task):
+ *   - free_buffer_queue holds indices of buffers safe to fill. sample_task
  *     checks one out to fill and, once full, hands its index to
  *     ready_buffer_queue.
  *   - publish_task blocks on ready_buffer_queue, publishes the window, then
  *     returns the index to free_buffer_queue.
  * If free_buffer_queue is ever empty, publish_task has fallen behind by a full
- * window -- sample_timer_cb drops the sample and logs it rather than
+ * window -- sample_task drops the sample and logs it rather than
  * overwriting a buffer publish_task might still be reading. */
 #define WINDOW_QUEUE_DEPTH 2
 static sample_window_t window_pool[WINDOW_QUEUE_DEPTH];
@@ -208,7 +209,7 @@ static bool build_window_json(const sample_window_t *window, char *buf, size_t b
 #define MQTT_PUBLISH_OUTBOX_FULL (-2)
 
 /* Consumer side of the free/ready queue pair described above free_buffer_queue:
- * blocks until sample_timer_cb hands off a full window, turns it into JSON,
+ * blocks until sample_task hands off a full window, turns it into JSON,
  * publishes it over MQTT, then returns the buffer to the free pool. Runs as
  * its own task so a slow publish never delays the next sample. */
 static void publish_task(void *arg)
@@ -245,49 +246,69 @@ static void publish_task(void *arg)
             ESP_LOGI(TAG, "Published %d-sample window to %s (%d bytes)", WINDOW_SIZE, VIBRATION_TOPIC, (int)len);
         }
 
-        // Return buffer to free pool so sample_timer_cb can check it out again
+        // Return buffer to free pool so sample_task can check it out again
         xQueueSend(free_buffer_queue, &ready_window_index, 0);
     }
 }
 
-/* Samples accelerometer data once into a window buffer from free_buffer_queue, handing it off to ready_buffer_queue once full (window filled).
+/* GPIO ISR for the MPU6050's INT line: fires once per sensor sample
+ * (DATA_RDY, enabled via mpu6050_enable_data_ready_interrupt). Runs in true
+ * interrupt context, so it can't touch the I2C driver directly (I2C
+ * transactions aren't ISR-safe) -- it just wakes sample_task via a task
+ * notification, which is, and does the actual read there. */
+static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
+{
+    (void)arg;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(sample_task_handle, &higher_priority_task_woken);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
+
+/* Blocks on the MPU6050's DATA_RDY interrupt (relayed via mpu6050_int_isr_handler),
+ * then samples accelerometer data once into a window buffer checked out from
+ * free_buffer_queue, handing it off to ready_buffer_queue once full (window filled).
  * Skips sampling when no free buffer is available (publish_task has fallen behind).
 */
-static void sample_timer_cb(void *arg)
+static void sample_task(void *arg)
 {
     (void)arg;
 
     // Index of pool buffer this window is filling, or -1 when none (start of a new window).
-    static int active_window_index = -1;
+    int active_window_index = -1;
     // Index of next sample to write into the active buffer, reset to 0 for new window.
-    static int next_sample_index;
+    int next_sample_index = 0;
 
-    if (active_window_index < 0) {
-        if (xQueueReceive(free_buffer_queue, &active_window_index, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
-            return;
+    while (1) {
+        // Block until the sensor's INT line pulses for the next sample
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        if (active_window_index < 0) {
+            if (xQueueReceive(free_buffer_queue, &active_window_index, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
+                continue;
+            }
+            next_sample_index = 0;
         }
-        next_sample_index = 0;
-    }
 
-    mpu6050_measurements_t accel;
-    esp_err_t err = mpu6050_read_accel(mpu6050_sensor, &accel);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
-        return;
-    }
+        mpu6050_measurements_t accel;
+        esp_err_t err = mpu6050_read_accel(mpu6050_sensor, &accel);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
+            continue;
+        }
 
-    // Write the sample into the active buffer
-    sample_window_t *buf = &window_pool[active_window_index];
-    buf->ax[next_sample_index] = accel.accel_x;
-    buf->ay[next_sample_index] = accel.accel_y;
-    buf->az[next_sample_index] = accel.accel_z;
-    next_sample_index++;
+        // Write the sample into the active buffer
+        sample_window_t *buf = &window_pool[active_window_index];
+        buf->ax[next_sample_index] = accel.accel_x;
+        buf->ay[next_sample_index] = accel.accel_y;
+        buf->az[next_sample_index] = accel.accel_z;
+        next_sample_index++;
 
-    // If the window is filled to max, send the buffer to the ready queue for publishing
-    if (next_sample_index >= WINDOW_SIZE) {
-        xQueueSend(ready_buffer_queue, &active_window_index, 0);
-        active_window_index = -1;
+        // If the window is filled to max, send the buffer to the ready queue for publishing
+        if (next_sample_index >= WINDOW_SIZE) {
+            xQueueSend(ready_buffer_queue, &active_window_index, 0);
+            active_window_index = -1;
+        }
     }
 }
 
@@ -306,6 +327,7 @@ void app_main(void)
         .accel_fs = MPU6050_ACCEL_FS_4G,
     };
     ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &mpu6050_sensor));
+    ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
 
     /* Connects to WiFi using the SSID/password configured in
      * `idf.py menuconfig` under "Example Connection Configuration". */
@@ -313,7 +335,7 @@ void app_main(void)
 
     mqtt_app_start();
 
-    /* Seed the free queue with every buffer index so sample_timer_cb has a
+    /* Seed the free queue with every buffer index so sample_task has a
      * pool to check out from as soon as sampling starts. */
     free_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     ready_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
@@ -323,14 +345,22 @@ void app_main(void)
     }
 
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
+    xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
 
-    /* Starts the periodic sampling timer last, only once WiFi/MQTT/the
-     * publish task are all up, so sample_timer_cb never runs against
-     * half-initialized state. */
-    const esp_timer_create_args_t timer_args = {
-        .callback = sample_timer_cb,
-        .name = "sample_timer",
+    /* Attaches the GPIO interrupt last, only once WiFi/MQTT/both tasks are
+     * all up, so mpu6050_int_isr_handler never fires against
+     * half-initialized state (sample_task_handle in particular must be
+     * non-NULL before the first DATA_RDY pulse can arrive). */
+    const gpio_config_t int_gpio_cfg = {
+        .pin_bit_mask = 1ULL << CONFIG_MPU6050_INT_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        // MPU6050 INT_PIN_CFG default is active-high push-pull, so the
+        // sensor's pulse shows up as a rising edge on this GPIO.
+        .intr_type = GPIO_INTR_POSEDGE,
     };
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &sample_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(sample_timer, 1000000 / SAMPLE_RATE_HZ));
+    ESP_ERROR_CHECK(gpio_config(&int_gpio_cfg));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_MPU6050_INT_GPIO, mpu6050_int_isr_handler, NULL));
 }

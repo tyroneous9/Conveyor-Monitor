@@ -28,6 +28,17 @@ menu "Example Configuration"
         help
             GPIO connected to the MPU6050's SCL pin.
 
+    config MPU6050_INT_GPIO
+        int "MPU6050 INT GPIO"
+        default 4
+        help
+            GPIO connected to the MPU6050's INT pin. The sensor pulses this
+            line once per internal sample (DATA_RDY, enabled in
+            mpu6050_enable_data_ready_interrupt()); app_main.c attaches a
+            GPIO ISR here that wakes sample_task, so sampling is driven by
+            the sensor's own hardware interrupt rather than a software
+            timer.
+
     config MPU6050_I2C_FREQ_HZ
         int "MPU6050 I2C bus frequency (Hz)"
         default 400000
@@ -38,12 +49,15 @@ menu "Example Configuration"
         int "Accelerometer sample rate (Hz)"
         default 500
         help
-            Fixed sample rate for the vibration window buffer, driven by a
-            hardware-backed esp_timer (not the FreeRTOS tick, which at
-            CONFIG_FREERTOS_HZ=100 is too coarse for rates like this).
-            Should eventually be picked against Nyquist once target
-            mechanical frequencies (motor RPM, belt-pass frequency) are
-            known.
+            Sample rate for the vibration window buffer. This must match
+            the rate MPU6050_SMPLRT_DIV_REG is programmed for in
+            mpu6050_init() (1kHz / (1 + SMPLRT_DIV) with the DLPF enabled) --
+            it's not independently configurable here, since sampling is
+            driven by the sensor's own DATA_RDY interrupt at that rate, not
+            a separately-timed loop on the ESP32 side. Used for the JSON
+            payload's sample_rate_hz field and for picking against Nyquist
+            once target mechanical frequencies (motor RPM, belt-pass
+            frequency) are known.
 
     config SAMPLE_WINDOW_SIZE
         int "Samples per published window"

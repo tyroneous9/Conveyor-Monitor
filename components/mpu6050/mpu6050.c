@@ -18,6 +18,8 @@ static const char *TAG = "mpu6050";
 #define MPU6050_CONFIG_REG          0x1A // general config register, holds the DLPF setting
 #define MPU6050_ACCEL_CONFIG_REG    0x1C // accelerometer full-scale range (AFS_SEL lives in bits 4:3)
 #define MPU6050_ACCEL_CONFIG_AFS_SEL_SHIFT 3
+#define MPU6050_INT_ENABLE_REG      0x38 // interrupt source enables
+#define MPU6050_INT_ENABLE_DATA_RDY_BIT 0 // fires once per internal sample
 
 struct mpu6050_dev_t {
     i2c_master_bus_handle_t bus_handle;
@@ -164,4 +166,14 @@ esp_err_t mpu6050_read_accel(mpu6050_handle_t handle, mpu6050_measurements_t *ou
     out_measurements->accel_z = raw / handle->accel_lsb_per_g;
 
     return ESP_OK;
+}
+
+esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle)
+{
+    /* INT_PIN_CFG (0x37) is left at its power-on default: active-high,
+     * push-pull, 50us pulse per interrupt, auto-cleared -- exactly what an
+     * edge-triggered GPIO ISR on the host side wants, so there's nothing
+     * to configure there. */
+    return mpu6050_register_write_byte(handle->dev_handle, MPU6050_INT_ENABLE_REG,
+                                        1 << MPU6050_INT_ENABLE_DATA_RDY_BIT);
 }

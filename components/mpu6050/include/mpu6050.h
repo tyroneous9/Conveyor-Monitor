@@ -41,6 +41,15 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
  */
 esp_err_t mpu6050_read_accel(mpu6050_handle_t handle, mpu6050_measurements_t *out_measurements);
 
+/**
+ * @brief Enable the sensor's DATA_RDY interrupt (fires once per internal
+ * sample, at the rate mpu6050_init() configured via SMPLRT_DIV). The
+ * device's INT pin should be wired to a GPIO configured for edge-triggered
+ * interrupts by the caller -- this only turns on the interrupt source
+ * inside the sensor itself.
+ */
+esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle);
+
 #ifdef __cplusplus
 }
 #endif
