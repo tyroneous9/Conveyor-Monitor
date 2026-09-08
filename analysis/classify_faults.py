@@ -40,14 +40,12 @@ log = logging.getLogger("classify_faults")
 
 def band_amplitude(freq_hz, fft_amp, center_hz, width_hz):
     """Sum of linear FFT magnitude within [center-width/2, center+width/2]
-    -- a band, not a single bin, because motor/belt speed drifts run to
-    run and can shift the true peak to an adjacent bin
-    between windows; a single-bin lookup would miss it."""
+    Bands are used instead of bins to avoid possible jittering."""
     lo, hi = center_hz - width_hz / 2, center_hz + width_hz / 2
     return sum(a for f, a in zip(freq_hz, fft_amp) if lo <= f <= hi)
 
 
-def compute_amplitudes(windows, band_center_hz, band_width_hz):
+def compute_band_amplitudes(windows, band_center_hz, band_width_hz):
     """band_amplitude for every window, keyed by window_id, computed once
     and reused for the baseline fit, classification, and plotting."""
     return {c["window_id"]: band_amplitude(c["freq_hz"], c["fft_ay"], band_center_hz, band_width_hz) for c in windows}
@@ -72,10 +70,7 @@ def compute_threshold(amplitudes, fit_windows, n_std):
 
 
 def classify(conn, amplitudes, windows, threshold, persist):
-    """Apply the threshold to each window (value > threshold => "worn").
-    Persists each verdict via storage.store_classification when persist is
-    True -- skipped for the windows used to fit the baseline, since scoring
-    them against their own threshold would be circular."""
+    """Apply the threshold to each window to classsify it as worn if amplitude threshold is exceeded."""
     results = []
     for c in windows:
         value = amplitudes[c["window_id"]]
@@ -97,10 +92,8 @@ def confusion_counts(rows):
 
 
 def write_report(rows, threshold, baseline_mean, baseline_std, n_std, n_healthy, n_worn, out_path):
-    """Build the confusion matrix + accuracy/precision/recall for `rows`
-    and write it as a markdown table to out_path. Returns the report lines
-    (for printing to stdout too) and the (accuracy, precision, recall)
-    tuple."""
+    """Build the confusion matrix + accuracy/precision/recall.
+    Output to: markdown table to out_path, AND return the (accuracy, precision, recall) tuple."""
     tp, tn, fp, fn = confusion_counts(rows)
     n = len(rows)
     accuracy = (tp + tn) / n if n else float("nan")
@@ -127,11 +120,7 @@ def write_report(rows, threshold, baseline_mean, baseline_std, n_std, n_healthy,
 
 
 def plot_classification(rows, threshold, baseline_mean, baseline_std, out_path):
-    """Scatter every window's feature value by window id, colored by true
-    label (healthy/worn) and shaped by role (which of baseline-fit,
-    held-out, evaluated it played -- see the module docstring's methodology
-    note), with the threshold line and the baseline's ±1 std band overlaid
-    for context."""
+    """Plot a scatter chart of the belt-pass band amplitude for each window with classification."""
     fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
 
     markers = {"baseline-fit": "o", "held-out": "^", "evaluated": "s"}
@@ -189,8 +178,9 @@ def main():
     if not worn_windows:
         raise SystemExit("no windows are labeled worn; run analysis/labels.py first")
 
-    # 1. band amplitudes, computed once per window
-    amplitudes = compute_amplitudes(all_windows, args.band_center_hz, args.band_width_hz)
+    # 1. band amplitudes, computed once per labeled window (unlabeled
+    # windows in all_windows are never scored, so skip them)
+    amplitudes = compute_band_amplitudes(healthy_windows + worn_windows, args.band_center_hz, args.band_width_hz)
 
     # 2. split healthy windows into fit / held-out
     fit_windows, holdout_windows = split_healthy(healthy_windows, args.baseline_fraction)
