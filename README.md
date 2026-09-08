@@ -1,6 +1,6 @@
 # Conveyor Monitor
 
-Predictive maintenance for an industrial conveyor belt: an ESP32 samples vibration off an MPU6050 accelerometer, streams it over MQTT to a Raspberry Pi, and analyzes this data using FFT to predict belt wear.
+Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off an MPU6050 accelerometer, streams it over MQTT to a Raspberry Pi, and analyzes this data using FFT to predict belt wear.
 
 ![Physical setup](analysis/figures/physical_setup.png)
 
