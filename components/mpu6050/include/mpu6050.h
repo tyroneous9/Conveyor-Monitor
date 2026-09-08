@@ -50,6 +50,25 @@ esp_err_t mpu6050_read_accel(mpu6050_handle_t handle, mpu6050_measurements_t *ou
  */
 esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle);
 
+/**
+ * @brief Enable the sensor's onboard accelerometer FIFO (and reset it, so
+ * the first mpu6050_read_fifo_samples() call only sees samples captured
+ * after this point). With the FIFO enabled, a caller that wakes up late
+ * (e.g. a DATA_RDY-driven task delayed by scheduling) can still recover
+ * every sample that piled up in the meantime, instead of the accelerometer
+ * registers having already been overwritten by the newest one.
+ */
+esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle);
+
+/**
+ * @brief Drain up to max_samples accelerometer samples currently buffered
+ * in the sensor's FIFO into out_samples (oldest first), converted to g.
+ * *out_n_read is set to how many were actually available (0 if the FIFO
+ * was empty) -- always <= max_samples.
+ */
+esp_err_t mpu6050_read_fifo_samples(mpu6050_handle_t handle, mpu6050_measurements_t *out_samples,
+                                     int max_samples, int *out_n_read);
+
 #ifdef __cplusplus
 }
 #endif

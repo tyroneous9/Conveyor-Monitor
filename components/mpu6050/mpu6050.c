@@ -20,6 +20,15 @@ static const char *TAG = "mpu6050";
 #define MPU6050_ACCEL_CONFIG_AFS_SEL_SHIFT 3
 #define MPU6050_INT_ENABLE_REG      0x38 // interrupt source enables
 #define MPU6050_INT_ENABLE_DATA_RDY_BIT 0 // fires once per internal sample
+#define MPU6050_USER_CTRL_REG       0x6A // FIFO enable/reset live here
+#define MPU6050_USER_CTRL_FIFO_EN_BIT    6
+#define MPU6050_USER_CTRL_FIFO_RESET_BIT 2
+#define MPU6050_FIFO_EN_REG         0x23 // which data streams feed the FIFO
+#define MPU6050_FIFO_EN_ACCEL_BIT  3
+#define MPU6050_FIFO_COUNT_H_REG    0x72 // 16-bit big-endian byte count currently in the FIFO
+#define MPU6050_FIFO_R_W_REG        0x74 // read this address repeatedly to drain the FIFO
+#define MPU6050_FIFO_SAMPLE_BYTES  6 // one accel sample = 3 axes x 2 bytes
+#define MPU6050_FIFO_READ_CHUNK_SAMPLES 16 // bounds the on-stack scratch buffer below regardless of backlog size
 
 struct mpu6050_dev_t {
     i2c_master_bus_handle_t bus_handle;
@@ -176,4 +185,80 @@ esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle)
      * to configure there. */
     return mpu6050_register_write_byte(handle->dev_handle, MPU6050_INT_ENABLE_REG,
                                         1 << MPU6050_INT_ENABLE_DATA_RDY_BIT);
+}
+
+esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle)
+{
+    esp_err_t err;
+
+    /* Reset while FIFO_EN (USER_CTRL) is still 0, so the reset actually
+     * clears stale contents instead of racing an already-running FIFO. */
+    err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
+                                       1 << MPU6050_USER_CTRL_FIFO_RESET_BIT);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_FIFO_EN_REG,
+                                       1 << MPU6050_FIFO_EN_ACCEL_BIT);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
+                                        1 << MPU6050_USER_CTRL_FIFO_EN_BIT);
+}
+
+static esp_err_t mpu6050_read_fifo_count(mpu6050_handle_t handle, uint16_t *out_count)
+{
+    uint8_t buffer[2];
+    esp_err_t err = mpu6050_register_read(handle->dev_handle, MPU6050_FIFO_COUNT_H_REG, buffer, sizeof(buffer));
+    if (err != ESP_OK) {
+        return err;
+    }
+    *out_count = ((uint16_t)buffer[0] << 8) | buffer[1];
+    return ESP_OK;
+}
+
+esp_err_t mpu6050_read_fifo_samples(mpu6050_handle_t handle, mpu6050_measurements_t *out_samples,
+                                     int max_samples, int *out_n_read)
+{
+    uint16_t fifo_bytes;
+    esp_err_t err = mpu6050_read_fifo_count(handle, &fifo_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    int available = fifo_bytes / MPU6050_FIFO_SAMPLE_BYTES;
+    int remaining = available < max_samples ? available : max_samples;
+    int n_read = 0;
+
+    /* Chunked so the scratch buffer stays small on the stack no matter how
+     * large a backlog (max_samples) the caller asks us to drain. */
+    while (remaining > 0) {
+        int chunk = remaining < MPU6050_FIFO_READ_CHUNK_SAMPLES ? remaining : MPU6050_FIFO_READ_CHUNK_SAMPLES;
+        uint8_t buffer[MPU6050_FIFO_READ_CHUNK_SAMPLES * MPU6050_FIFO_SAMPLE_BYTES];
+        err = mpu6050_register_read(handle->dev_handle, MPU6050_FIFO_R_W_REG, buffer,
+                                     (size_t)chunk * MPU6050_FIFO_SAMPLE_BYTES);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        for (int i = 0; i < chunk; i++) {
+            const uint8_t *sample = &buffer[i * MPU6050_FIFO_SAMPLE_BYTES];
+            int16_t raw;
+            raw = (int16_t)((sample[0] << 8) | sample[1]);
+            out_samples[n_read].accel_x = raw / handle->accel_lsb_per_g;
+            raw = (int16_t)((sample[2] << 8) | sample[3]);
+            out_samples[n_read].accel_y = raw / handle->accel_lsb_per_g;
+            raw = (int16_t)((sample[4] << 8) | sample[5]);
+            out_samples[n_read].accel_z = raw / handle->accel_lsb_per_g;
+            n_read++;
+        }
+
+        remaining -= chunk;
+    }
+
+    *out_n_read = n_read;
+    return ESP_OK;
 }

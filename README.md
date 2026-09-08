@@ -31,7 +31,7 @@ flowchart LR
 
 **Explanation:**
 
-1. The MPU6050 measures vibration along three axes (x, y, z) which is sampled by the ESP32 at an exact 500Hz using a hardware timer (esp_timer). Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
+1. The MPU6050 measures vibration along three axes (x, y, z). This data is sampled by the ESP32 at an exact 500Hz. Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
 
     - A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 takes one every 2ms (500Hz).
 
@@ -52,7 +52,7 @@ flowchart LR
 ## Repo layout
 
 ```
-main/            ESP-IDF firmware: fixed-rate sampling, window buffering, MQTT publish
+main/            ESP-IDF firmware: interrupt-driven sampling (MPU6050 DATA_RDY + FIFO), window buffering, MQTT publish
 components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        labels.py, the classifier, report figures, Notebook
@@ -98,22 +98,20 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 
 ## Design decisions
 
-**1. Sampling uses a hardware timer and double buffer:**
-The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution. This means trying to sample at 500Hz (2ms) is impossible with such a delay, as it will be rounded up to 10ms minimum.
+**1. Sampling uses interrupts and a double buffer:**
+The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution. This means trying to sample at 500Hz (2ms) is impossible with such a delay, as it will be rounded up to 10ms minimum. In practice, sampling must be deferred to its own task.
 
-I replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick. On this timer, the ESP32 reads one sample and stores it at an exact, fixed rate. It runs in a high priority FreeRTOS task, which functions similarly to an interrupt. The publish task can be interrupted by `esp_timer` at any time due to the priority difference.
+The second attempt replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick, reading samples in a dedicated, high-priority `sample_task` with a precise timer. That fixed the rate problem, but left two issues: first, the ESP32's timer period and the MPU6050's own internal output rate (`SMPLRT_DIV`) were two independently configured values with nothing forcing them to agree.  This coupling is a problem for scalability if sample rate were to change in the future. Second, even if the rate is precise, this independent task could still be stalled, which is explained in the next version.
 
-Additionally, samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published on a separate, concurrent task, so a slow network publish never delays the next sample.
+The current version wires the MPU6050's INT pin to a GPIO and enables its DATA_RDY interrupt instead, so the sensor triggers the ESP32 exactly when a new sample exists, via a GPIO ISR (`mpu6050_int_isr_handler`) that wakes a dedicated `sample_task`. Additionally, the sensor's onboard FIFO now buffers samples to prevent data loss when the CPU is stalled.
 
-I avoided using the vendor's MPU6050 drivers as they add an additional fixed 500Hz to every sample due to reading a configuration register, even though it is defined once at init.
+Why is CPU stalled? `sample_task` can still occasionally be delayed by a few milliseconds. The WiFi/lwIP internals MQTT depends on run at a higher FreeRTOS priority than sample_task, and are able to interrupt it. Rather than ONLY reading the MPU6050's live accelerometer registers (which get overwritten by the next read, so a delay would drop samples), `sample_task` enables the sensor's onboard FIFO and reads everything currently buffered. A brief delay now costs latency, but not lost data.
 
-**2. Locally hosted broker:**
-My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
+**2. Sampling and MQTT share a double buffer:**
 
-**3. SQLite:**
-Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
+Successfully read samples are stored by queuing up in two window buffers. While one buffer is being filled with new samples, the other buffer (which already has a full window) is free to be turned into JSON and published to MQTT on a separate, concurrent task, so a slow network publish never delays the next sample.
 
-**4. Windows instead of samples:**
+**3. Windows instead of samples:**
 By allowing the ESP32 to collect samples locally into a window first, this guarantees that any single window is a consecutive set of samples. A window in progress can never be truncated or corrupted by network drops, only by hardware issues.
 
 MQTT can be configured via QoS (Quality of Service) to try to guarantee delivery of messages. In the case of a network drop, MQTT will keep retrying delivery, while windows that haven't been read yet will be enqueued into an outbox which can store up to 8 windows, all of which can be read once network is restored.
@@ -123,6 +121,12 @@ MQTT can be configured via QoS (Quality of Service) to try to guarantee delivery
 The window size of 256 samples is specifically chosen for two reasons. First, there is a reasonable amount of time between each window (~0.512 seconds), which means that the 8 window outbox allows for approximately 4.1 seconds of network downtime before windows get dropped, causing data corruption. In practice, this worst case only happens if there is a serious outage in which case testing should be done some other time. Small, infrequent network drops are the main target of this protection time.
 
     - Size tradeoffs: Increasing the size of the outbox increases the RAM usage. It is a non-issue in this case because testing was done on a dev board, but for a standalone ESP32 chip, the RAM usage of a large outbox is non-trivial considering the size of each window.
+
+**4. Locally hosted broker:**
+My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA3. Public MQTT brokers are also slow from overload. The solution was to host a broker over my phone's hotspot.
+
+**5. SQLite:**
+Given the Pi's limited RAM and CPU and also the simplicity of the data (just a few tables), a lightweight database like SQLite is sufficient.
 
 
 ## Setup

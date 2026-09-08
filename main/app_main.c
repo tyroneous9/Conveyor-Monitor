@@ -6,13 +6,18 @@
  *   2. Connects to a plain (non-TLS) MQTT broker
  *   3. Samples the MPU6050 accelerometer, driven by the sensor's own DATA_RDY
  *      hardware interrupt (see mpu6050_int_isr_handler) rather than a
- *      software timer, into a small pool of window buffers, handed off to a
- *      separate publish task over a pair of FreeRTOS queues (see the comment
- *      on free_buffer_queue), which publishes each full window as one JSON
+ *      software timer. Each wake drains whatever's currently sitting in the
+ *      sensor's onboard FIFO (see sample_task) rather than just its live
+ *      registers, so a late wake still recovers every sample that piled up
+ *      in the meantime instead of losing all but the newest. Samples land
+ *      in a small pool of window buffers, handed off to a separate publish
+ *      task over a pair of FreeRTOS queues (see the comment on
+ *      free_buffer_queue), which publishes each full window as one JSON
  *      message to sensors/vibration/raw. See backend/ingest.py for the
  *      consumer side of this exact contract.
  */
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -264,9 +269,19 @@ static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
+/* Bounds the on-stack scratch array used to drain the MPU6050's FIFO below,
+ * independent of how large a backlog piled up before this task got to run
+ * (mpu6050_read_fifo_samples chunks its own I2C reads to the same limit, so
+ * a bigger backlog just means more drain iterations, not a bigger buffer). */
+#define FIFO_DRAIN_BATCH_SAMPLES 16
+
 /* Blocks on the MPU6050's DATA_RDY interrupt (relayed via mpu6050_int_isr_handler),
- * then samples accelerometer data once into a window buffer checked out from
- * free_buffer_queue, handing it off to ready_buffer_queue once full (window filled).
+ * then drains every accelerometer sample currently sitting in the sensor's
+ * FIFO into a window buffer checked out from free_buffer_queue, handing it
+ * off to ready_buffer_queue once full (window filled). Draining the FIFO
+ * rather than reading one live register means a late wake (this task got
+ * preempted past one or more DATA_RDY pulses) still recovers every sample
+ * that piled up in the meantime, instead of only the newest one.
  * Skips sampling when no free buffer is available (publish_task has fallen behind).
 */
 static void sample_task(void *arg)
@@ -280,34 +295,46 @@ static void sample_task(void *arg)
 
     while (1) {
         // Block until the sensor's INT line pulses for the next sample
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t pulses_since_last_wake = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (pulses_since_last_wake > 1) {
+            ESP_LOGI(TAG, "sample_task woke late (%" PRIu32 " DATA_RDY pulses since last wake) -- draining FIFO",
+                      pulses_since_last_wake);
+        }
 
-        if (active_window_index < 0) {
-            if (xQueueReceive(free_buffer_queue, &active_window_index, 0) != pdTRUE) {
-                ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
-                continue;
+        while (1) {
+            mpu6050_measurements_t batch[FIFO_DRAIN_BATCH_SAMPLES];
+            int n_read;
+            esp_err_t err = mpu6050_read_fifo_samples(mpu6050_sensor, batch, FIFO_DRAIN_BATCH_SAMPLES, &n_read);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to read MPU6050 FIFO: %s", esp_err_to_name(err));
+                break;
             }
-            next_sample_index = 0;
-        }
+            if (n_read == 0) {
+                break; // FIFO fully drained
+            }
 
-        mpu6050_measurements_t accel;
-        esp_err_t err = mpu6050_read_accel(mpu6050_sensor, &accel);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to read MPU6050: %s", esp_err_to_name(err));
-            continue;
-        }
+            for (int i = 0; i < n_read; i++) {
+                if (active_window_index < 0) {
+                    if (xQueueReceive(free_buffer_queue, &active_window_index, 0) != pdTRUE) {
+                        ESP_LOGW(TAG, "publish_task fell behind, dropping sample (no free window buffer)");
+                        continue;
+                    }
+                    next_sample_index = 0;
+                }
 
-        // Write the sample into the active buffer
-        sample_window_t *buf = &window_pool[active_window_index];
-        buf->ax[next_sample_index] = accel.accel_x;
-        buf->ay[next_sample_index] = accel.accel_y;
-        buf->az[next_sample_index] = accel.accel_z;
-        next_sample_index++;
+                // Write the sample into the active buffer
+                sample_window_t *buf = &window_pool[active_window_index];
+                buf->ax[next_sample_index] = batch[i].accel_x;
+                buf->ay[next_sample_index] = batch[i].accel_y;
+                buf->az[next_sample_index] = batch[i].accel_z;
+                next_sample_index++;
 
-        // If the window is filled to max, send the buffer to the ready queue for publishing
-        if (next_sample_index >= WINDOW_SIZE) {
-            xQueueSend(ready_buffer_queue, &active_window_index, 0);
-            active_window_index = -1;
+                // If the window is filled to max, send the buffer to the ready queue for publishing
+                if (next_sample_index >= WINDOW_SIZE) {
+                    xQueueSend(ready_buffer_queue, &active_window_index, 0);
+                    active_window_index = -1;
+                }
+            }
         }
     }
 }
@@ -327,6 +354,7 @@ void app_main(void)
         .accel_fs = MPU6050_ACCEL_FS_4G,
     };
     ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &mpu6050_sensor));
+    ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
     ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
 
     /* Connects to WiFi using the SSID/password configured in
