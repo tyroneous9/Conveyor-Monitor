@@ -179,28 +179,32 @@ esp_err_t mpu6050_read_accel(mpu6050_handle_t handle, mpu6050_measurements_t *ou
 
 esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle)
 {
-    // Enables data ready interrupt automatically on data ready
+    // Enables INT pin to pull high every time a new sample is ready
     return mpu6050_register_write_byte(handle->dev_handle, MPU6050_INT_ENABLE_REG,
                                         1 << MPU6050_INT_ENABLE_DATA_RDY_BIT);
 }
 
 esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle)
 {
-    esp_err_t err;
-
     // Enable FIFO: samples can be stored in sensor's onboard queue
+
+    esp_err_t err;
+    
+    // Reset FIFO to clear any old samples
     err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
                                        1 << MPU6050_USER_CTRL_FIFO_RESET_BIT);
     if (err != ESP_OK) {
         return err;
     }
 
+    // Choose which data stream is read into FIFO. In this case, only accel data is needed
     err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_FIFO_EN_REG,
                                        1 << MPU6050_FIFO_EN_ACCEL_BIT);
     if (err != ESP_OK) {
         return err;
     }
 
+    // Enable FIFO so data can start getting stored automatically
     return mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
                                         1 << MPU6050_USER_CTRL_FIFO_EN_BIT);
 }
