@@ -134,7 +134,7 @@ def plot_full_spectrum(h, w, out_path):
 
 
 def plot_waveform(h, w, out_path):
-    """Side-by-side raw time-domain (pre-FFT) traces for one healthy and
+    """Side-by-side time-domain (pre-FFT) traces for one healthy and
     one worn window, so the reader sees the input the spectrum plots are
     derived from."""
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.2), dpi=150, sharey=True)
@@ -153,7 +153,7 @@ def plot_waveform(h, w, out_path):
         ax.grid(axis="y", color="#e1e0d9", lw=0.8)
         ax.set_axisbelow(True)
     axes[0].set_ylabel("g (raw, one axis: ay)")
-    fig.suptitle("Raw time-domain signal (before any transform)", y=1.02)
+    fig.suptitle("Time-domain signal (before transform)", y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
