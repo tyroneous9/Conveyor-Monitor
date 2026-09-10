@@ -237,10 +237,7 @@ static void publish_task(void *arg)
             continue;
         }
 
-        /* Publish unconditionally, even while mqtt_is_connected is false: at
-         * QoS 1 the client queues into its outbox (bounded by
-         * OUTBOX_LIMIT_BYTES above) and flushes it on reconnect, so a brief
-         * drop no longer means a silently lost window. */
+        // Publish unconditionally, and queue into outbox when connection is lost
         int msg_id = esp_mqtt_client_publish(mqtt_client, VIBRATION_TOPIC, window_json_buf, (int)len, /*qos=*/1, /*retain=*/0);
         if (msg_id == MQTT_PUBLISH_OUTBOX_FULL) {
             ESP_LOGW(TAG, "Outbox full, dropping window (broker unreachable too long)");
@@ -375,20 +372,20 @@ void app_main(void)
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
     xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
 
-    /* Attaches the GPIO interrupt last, only once WiFi/MQTT/both tasks are
-     * all up, so mpu6050_int_isr_handler never fires against
-     * half-initialized state (sample_task_handle in particular must be
-     * non-NULL before the first DATA_RDY pulse can arrive). */
+    // Configure CONFIG_MPU6050_INT_GPIO as an interrupt pin
     const gpio_config_t int_gpio_cfg = {
         .pin_bit_mask = 1ULL << CONFIG_MPU6050_INT_GPIO,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        // MPU6050 INT_PIN_CFG default is active-high push-pull, so the
-        // sensor's pulse shows up as a rising edge on this GPIO.
+        // Set to interrupt on rising edge, since the MPU6050 INT pin is pulled high on sample ready
         .intr_type = GPIO_INTR_POSEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&int_gpio_cfg));
+
+    // Install the GPIO ISR service to watch for interrupts
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
+
+    // Register mpu6050_int_isr_handler to be called on interrupts from CONFIG_MPU6050_INT_GPIO
     ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_MPU6050_INT_GPIO, mpu6050_int_isr_handler, NULL));
 }
