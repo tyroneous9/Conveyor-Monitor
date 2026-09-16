@@ -17,7 +17,7 @@ Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware"]
     ESP -->|"publish window"| Broker["MQTT broker"]
     Broker --> Ingest["ingest.py"]
