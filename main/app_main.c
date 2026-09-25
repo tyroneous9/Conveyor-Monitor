@@ -1,20 +1,11 @@
 /*
- * Conveyor Monitor — WiFi + MQTT sensor publisher (simplified learning version)
+ * Conveyor Monitor firmware
  *
- * What this does:
- *   1. Connects to WiFi (SSID/password set via `idf.py menuconfig`)
- *   2. Connects to a plain (non-TLS) MQTT broker
- *   3. Samples the MPU6050 accelerometer, driven by the sensor's own DATA_RDY
- *      hardware interrupt (see mpu6050_int_isr_handler) rather than a
- *      software timer. Each wake drains whatever's currently sitting in the
- *      sensor's onboard FIFO (see sample_task) rather than just its live
- *      registers, so a late wake still recovers every sample that piled up
- *      in the meantime instead of losing all but the newest. Samples land
- *      in a small pool of window buffers, handed off to a separate publish
- *      task over a pair of FreeRTOS queues (see the comment on
- *      free_buffer_queue), which publishes each full window as one JSON
- *      message to sensors/vibration/raw. See backend/ingest.py for the
- *      consumer side of this exact contract.
+ * Logic:
+ *   1. Connects to WiFi (hardcoded SSID/password)
+ *   2. Connects to MQTT broker
+ *   3. Samples MPU6050
+ *   4. Publishes sampled data to the MQTT broker as JSON
  */
 
 #include <inttypes.h>
@@ -42,9 +33,7 @@ static const char *TAG = "conveyor_monitor";
 #define SAMPLE_RATE_HZ CONFIG_SAMPLE_RATE_HZ
 #define WINDOW_SIZE CONFIG_SAMPLE_WINDOW_SIZE
 
-/* Generous per-value budget (sign, 4 decimals, comma) so this always fits
- * whatever WINDOW_SIZE is configured to, instead of a fixed guess that could
- * silently become too small if WINDOW_SIZE changes. */
+// Huge json buffer (can be reduced) in case of large window sizes
 #define JSON_BUFFER_SIZE (WINDOW_SIZE * 3 * 20 + 128)
 
 #define VIBRATION_TOPIC "sensors/vibration/raw"
@@ -61,26 +50,13 @@ static mpu6050_handle_t mpu6050_sensor;
 static TaskHandle_t sample_task_handle;
 static char window_json_buf[JSON_BUFFER_SIZE];
 
-/* A WINDOW_QUEUE_DEPTH-buffer pool, checked in and out via two FreeRTOS
- * queues, so a slow MQTT publish (network I/O, in publish_task) never blocks
- * or delays the next sample due (in sample_task):
- *   - free_buffer_queue holds indices of buffers safe to fill. sample_task
- *     checks one out to fill and, once full, hands its index to
- *     ready_buffer_queue.
- *   - publish_task blocks on ready_buffer_queue, publishes the window, then
- *     returns the index to free_buffer_queue.
- * If free_buffer_queue is ever empty, publish_task has fallen behind by a full
- * window -- sample_task drops the sample and logs it rather than
- * overwriting a buffer publish_task might still be reading. */
+// Queue limit for the window buffer pool
 #define WINDOW_QUEUE_DEPTH 2
 static sample_window_t window_pool[WINDOW_QUEUE_DEPTH];
 static QueueHandle_t free_buffer_queue;
 static QueueHandle_t ready_buffer_queue;
 
-/* MQTT client event callback, registered in mqtt_app_start. Just tracks
- * connection state (mqtt_is_connected, read by publish_task) and logs --
- * publishing itself doesn't wait for this, since QoS 1 + the outbox handle
- * buffering while disconnected. */
+// MQTT connection handler
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     (void)handler_args;
@@ -107,32 +83,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-/* Bounds how much a network drop can queue up in the client's outbox before
- * windows start getting dropped -- enough to ride out a ~10s hotspot hiccup
- * at the default sample rate/window size without growing unbounded on a
- * memory-constrained device. */
+// Outbox limit for MQTT client (how many windows can be stored while connection is down)
 #define OUTBOX_LIMIT_BYTES (JSON_BUFFER_SIZE * 8)
 
 static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
-        /* Default buffer is sized for small example payloads, not a whole
-         * JSON sample window -- match it to what we actually send. */
         .buffer.size = JSON_BUFFER_SIZE,
-        /* Default is 120s; the network here is a phone hotspot, which can
-         * idle-timeout/drop the radio to save battery -- keep traffic
-         * frequent enough that it doesn't look idle. The client pings at
-         * roughly half this interval. */
-        .session.keepalive = 30,
-        /* QoS 1 publishes queue in this outbox and get resent on reconnect
-         * (auto-reconnect is on by default) instead of being dropped the
-         * moment the link blips -- see the outbox-full handling in
-         * publish_task. */
         .outbox.limit = OUTBOX_LIMIT_BYTES,
-        /* Default is 10s; reconnect quickly so a brief hotspot drop doesn't
-         * let the outbox back up any longer than it has to. */
-        .network.reconnect_timeout_ms = 2000,
     };
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -140,9 +99,8 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(mqtt_client);
 }
 
-/* Formats one more piece of text into `buf` at `offset` (printf-style).
- * Returns the new offset, or JSON_WRITE_FAILED if it wouldn't fit.
- */
+/* Formats some text into array `buf` at index `offset`
+ * Returns the new offset, or JSON_WRITE_FAILED if it won't fit */
 #define JSON_WRITE_FAILED SIZE_MAX
 static size_t json_write(char *buf, size_t buf_size, size_t offset, const char *fmt, ...)
 {
@@ -157,8 +115,9 @@ static size_t json_write(char *buf, size_t buf_size, size_t offset, const char *
     return offset + (size_t)written;
 }
 
-/* Helper function to append "<key>":[<v0>,<v1>,...] at *out_offset.
- * Returns false if it would overflow buf_size AND ALSO does not update *out_offset. */
+/* Helper function to format key-value pairs as JSON, 
+ * Specifically for vibration dimension (keys) to individual samples (values) 
+ * e.x. "ax":[1.0000,2.0000,...] */
 static bool append_float_array(char *buf, size_t buf_size, size_t *out_offset,
                                 const char *key, const float *values, int count)
 {
@@ -166,7 +125,7 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *out_offset,
     size_t offset = json_write(buf, buf_size, *out_offset, "\"%s\":[", key);
     if (offset == JSON_WRITE_FAILED) return false;
 
-    // Write each value, comma-separated, e.x. 1,2,3
+    // Write the values, comma-separated, e.x. 1,2,3
     for (int i = 0; i < count; i++) {
         offset = json_write(buf, buf_size, offset, i == 0 ? "%.4f" : ",%.4f", values[i]);
         if (offset == JSON_WRITE_FAILED) return false;
@@ -181,10 +140,8 @@ static bool append_float_array(char *buf, size_t buf_size, size_t *out_offset,
     return true;
 }
 
-/* Serializes one full window to the JSON contract documented at the top of
- * this file (and consumed by backend/ingest.py):
- *   {"sample_rate_hz":N,"ax":[...],"ay":[...],"az":[...]}
- * Returns false (leaving *out_len untouched) if it wouldn't fit in buf. */
+/* Writes a window as JSON into 'buf'
+ * Returns false if it wouldn't fit in buf. */
 static bool build_window_json(const sample_window_t *window, char *buf, size_t buf_size, size_t *out_len)
 {
     size_t offset = json_write(buf, buf_size, 0, "{\"sample_rate_hz\":%d,", SAMPLE_RATE_HZ);
@@ -209,14 +166,10 @@ static bool build_window_json(const sample_window_t *window, char *buf, size_t b
     return true;
 }
 
-/* esp_mqtt_client_publish()'s documented (but unnamed, in the library itself)
- * return value meaning "the outbox is full" -- see mqtt_client.h. */
+// Return value for when the MQTT outbox is full
 #define MQTT_PUBLISH_OUTBOX_FULL (-2)
 
-/* Consumer side of the free/ready queue pair described above free_buffer_queue:
- * blocks until sample_task hands off a full window, turns it into JSON,
- * publishes it over MQTT, then returns the buffer to the free pool. Runs as
- * its own task so a slow publish never delays the next sample. */
+// RTOS task for publishing windows over MQTT
 static void publish_task(void *arg)
 {
     (void)arg;
@@ -253,11 +206,7 @@ static void publish_task(void *arg)
     }
 }
 
-/* GPIO ISR for the MPU6050's INT line: fires once per sensor sample
- * (DATA_RDY, enabled via mpu6050_enable_data_ready_interrupt). Runs in true
- * interrupt context, so it can't touch the I2C driver directly (I2C
- * transactions aren't ISR-safe) -- it just wakes sample_task via a task
- * notification, which is, and does the actual read there. */
+// GPIO ISR handler for MPU6050's INT line
 static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
 {
     (void)arg;
@@ -266,21 +215,11 @@ static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-/* Bounds the on-stack scratch array used to drain the MPU6050's FIFO below,
- * independent of how large a backlog piled up before this task got to run
- * (mpu6050_read_fifo_samples chunks its own I2C reads to the same limit, so
- * a bigger backlog just means more drain iterations, not a bigger buffer). */
+// Limit for samples read in one batch from the MPU6050's FIFO 
 #define FIFO_DRAIN_BATCH_SAMPLES 16
 
-/* Blocks on the MPU6050's DATA_RDY interrupt (relayed via mpu6050_int_isr_handler),
- * then drains every accelerometer sample currently sitting in the sensor's
- * FIFO into a window buffer checked out from free_buffer_queue, handing it
- * off to ready_buffer_queue once full (window filled). Draining the FIFO
- * rather than reading one live register means a late wake (this task got
- * preempted past one or more DATA_RDY pulses) still recovers every sample
- * that piled up in the meantime, instead of only the newest one.
- * Skips sampling when no free buffer is available (publish_task has fallen behind).
-*/
+
+// RTOS task for sampling the MPU6050 and filling window buffers
 static void sample_task(void *arg)
 {
     (void)arg;
@@ -338,8 +277,7 @@ static void sample_task(void *arg)
 
 void app_main(void)
 {
-    /* ESP-IDF baseline: NVS backs WiFi credential storage, esp_netif +
-     * the default event loop are required by both WiFi and MQTT. */
+    // Initialize NVS, network interface, and default event loop
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -354,14 +292,13 @@ void app_main(void)
     ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
     ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
 
-    /* Connects to WiFi using the SSID/password configured in
-     * `idf.py menuconfig` under "Example Connection Configuration". */
+    // Connect to the network
     ESP_ERROR_CHECK(example_connect());
 
+    // Start MQTT client
     mqtt_app_start();
 
-    /* Seed the free queue with every buffer index so sample_task has a
-     * pool to check out from as soon as sampling starts. */
+    // Create the free and ready buffer queues
     free_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     ready_buffer_queue = xQueueCreate(WINDOW_QUEUE_DEPTH, sizeof(int));
     configASSERT(free_buffer_queue != NULL && ready_buffer_queue != NULL);
@@ -369,10 +306,11 @@ void app_main(void)
         xQueueSend(free_buffer_queue, &i, 0);
     }
 
+    // Create the publish and sample tasks
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
     xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
 
-    // Configure CONFIG_MPU6050_INT_GPIO as an interrupt pin
+    // Configure the MPU6050 INT GPIO pin as an interrupt pin
     const gpio_config_t int_gpio_cfg = {
         .pin_bit_mask = 1ULL << CONFIG_MPU6050_INT_GPIO,
         .mode = GPIO_MODE_INPUT,
