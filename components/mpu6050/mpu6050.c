@@ -15,7 +15,7 @@ static const char *TAG = "mpu6050";
 #define MPU6050_RESET_BIT           7
 #define MPU6050_ACCEL_XOUT          0x3B // accel registers read from 0x3B to 0x40, x to y to z, each one using 2 bytes
 #define MPU6050_SMPLRT_DIV_REG      0x19 // sample rate divider
-#define MPU6050_CONFIG_REG          0x1A // general config register, holds the DLPF setting
+#define MPU6050_CONFIG_REG          0x1A // general config register, holds digital low pass filter (DLPF) setting
 #define MPU6050_ACCEL_CONFIG_REG    0x1C // accelerometer full-scale range (AFS_SEL lives in bits 4:3)
 #define MPU6050_ACCEL_CONFIG_AFS_SEL_SHIFT 3
 #define MPU6050_INT_ENABLE_REG      0x38 // interrupt source enables
@@ -96,7 +96,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         return err;
     }
 
-    /* Read the MPU6050 WHO_AM_I register, on power up the register should have the value 0x68 */
+    /* Check if MPU6050 is connected by reading the WHO_AM_I register */
     uint8_t who_am_i;
     err = mpu6050_register_read(dev->dev_handle, MPU6050_WHO_AM_I_REG_ADDR, &who_am_i, 1);
     if (err != ESP_OK) {
@@ -105,8 +105,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
     }
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", who_am_i);
 
-    /* Reset the device, then clear the SLEEP bit it powers up (and comes out of
-     * reset) with - SLEEP must be cleared explicitly before it produces data. */
+    // Reset the device, then clear the SLEEP bit*/
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_PWR_MGMT_1_REG_ADDR, 1 << MPU6050_RESET_BIT);
     if (err != ESP_OK) {
         goto fail;
@@ -117,15 +116,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         goto fail;
     }
 
-    /* --- Vibration-monitoring configuration ---
-     * Power-on defaults aren't tuned for reading conveyor/bearing vibration,
-     * so set them explicitly. These three settings interact (DLPF picks the
-     * internal rate that SMPLRT_DIV divides down), so they're grouped here. */
-
-    /* DLPF_CFG = 1 selects the second DLPF setting (see datasheet table),
-     * giving roughly a 184Hz bandwidth. That's wide enough to pass typical
-     * bearing-fault harmonics without them being smoothed away, and it also
-     * sets the sensor's internal sample rate to 1kHz (used just below). */
+    // Configure the digital low pass filter (DLPF) to setting 1 (184Hz bandwidth)
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_CONFIG_REG, 1);
     if (err != ESP_OK) {
         goto fail;

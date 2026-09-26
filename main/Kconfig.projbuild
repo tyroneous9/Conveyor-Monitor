@@ -41,7 +41,7 @@ menu "Example Configuration"
 
     config MPU6050_I2C_FREQ_HZ
         int "MPU6050 I2C bus frequency (Hz)"
-        default 400000
+        default 100000
         help
             I2C clock speed used to talk to the MPU6050.
 
