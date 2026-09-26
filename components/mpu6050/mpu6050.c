@@ -63,6 +63,27 @@ static float mpu6050_accel_fs_lsb_per_g(mpu6050_accel_fs_t fs)
     return lsb_per_g[fs];
 }
 
+/**
+ * @brief Debug helper: probe every 7-bit I2C address and log which ones ACK.
+ * MPU6050 should show up at 0x68 (AD0 low) or 0x69 (AD0 high)
+ */
+static void mpu6050_scan_bus(i2c_master_bus_handle_t bus_handle)
+{
+    int found = 0;
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    for (uint16_t addr = 0x08; addr < 0x78; addr++) {
+        esp_err_t err = i2c_master_probe(bus_handle, addr, 50);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "  device found at 0x%02X", addr);
+            found++;
+        } else if (err == ESP_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "  bus timed out at 0x%02X and no devices found", addr);
+            return;
+        }
+    }
+    ESP_LOGI(TAG, "Scan done, %d device(s) found", found);
+}
+
 esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_handle)
 {
     struct mpu6050_dev_t *dev = calloc(1, sizeof(*dev));
@@ -83,6 +104,8 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         free(dev);
         return err;
     }
+    
+    mpu6050_scan_bus(dev->bus_handle);
 
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
