@@ -53,7 +53,7 @@ flowchart TD
 
 ```
 main/            ESP-IDF firmware: interrupt-driven sampling (MPU6050 DATA_RDY + FIFO), window buffering, MQTT publish
-components/      MPU6050 I2C driver + vendored esp-mqtt
+components/      MPU6050 I2C driver, WiFi station bring-up + vendored esp-mqtt
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        labels.py, the classifier, report figures, Notebook
 deploy/          Mosquitto config + systemd unit for running the broker and ingest.py as persistent services on the Pi
@@ -151,7 +151,7 @@ Adjacent windows are highly correlated (they're 0.512s apart from the same few m
 **Firmware** (ESP-IDF):
 ```
 idf.py set-target esp32
-idf.py menuconfig   # set WiFi credentials and the MQTT broker URI (see main/Kconfig.projbuild)
+idf.py menuconfig   # set WiFi credentials (components/wifi/Kconfig) and the MQTT broker URI (main/Kconfig.projbuild)
 idf.py build flash monitor
 ```
 

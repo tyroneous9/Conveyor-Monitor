@@ -1,27 +1,5 @@
 menu "Conveyor Monitor Project Configuration"
 
-    config WIFI_SSID
-        string "WiFi SSID"
-        default "myssid"
-        help
-            SSID of the WiFi network to join.
-
-    config WIFI_PASSWORD
-        string "WiFi password"
-        default "mypassword"
-        help
-            WiFi password. Networks weaker than WPA2 are rejected unless this
-            is left empty, in which case an open network is expected.
-
-    config WIFI_MAX_BACKOFF_MS
-        int "Max WiFi reconnect backoff (ms)"
-        default 30000
-        range 1000 600000
-        help
-            Upper bound on the delay between reconnect attempts. The delay
-            starts at 1s and doubles after each failed attempt up to this
-            value. Reconnection is retried indefinitely.
-
     config MQTT_BROKER_URI
         string "MQTT broker URI"
         default "mqtt://raspberrypi.local:1883"
