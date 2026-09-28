@@ -2,7 +2,7 @@
  * Conveyor Monitor firmware
  *
  * Logic:
- *   1. Connects to WiFi (hardcoded SSID/password)
+ *   1. Connects to WiFi (SSID/password from Kconfig)
  *   2. Connects to MQTT broker
  *   3. Samples MPU6050
  *   4. Publishes sampled data to the MQTT broker as JSON
@@ -29,7 +29,7 @@
 
 #include "mpu6050.h"
 #include "mqtt_client.h"
-#include "protocol_examples_common.h"
+#include "wifi.h"
 
 static const char *TAG = "conveyor_monitor";
 
@@ -92,7 +92,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
+        .broker.address.uri = CONFIG_MQTT_BROKER_URI,
         .buffer.size = JSON_BUFFER_SIZE,
         .outbox.limit = OUTBOX_LIMIT_BYTES,
     };
@@ -310,8 +310,13 @@ void app_main(void)
     // Print chip information at startup
     print_chip_info();
 
-    // Initialize NVS, network interface, and default event loop
-    ESP_ERROR_CHECK(nvs_flash_init());
+    // Initialize NVS (erasing it if the partition is full or from an older format), network interface, and default event loop
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_err);
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -325,8 +330,12 @@ void app_main(void)
     ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
     ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
 
-    // Connect to the network
-    ESP_ERROR_CHECK(example_connect());
+    // Connect to the network. Not fatal if it times out: WiFi keeps retrying in the
+    // background, and the MQTT client reconnects and drains its outbox once it's up
+    wifi_start();
+    if (!wifi_wait_connected(pdMS_TO_TICKS(15000))) {
+        ESP_LOGW(TAG, "WiFi not connected yet, continuing (will keep retrying)");
+    }
 
     // Start MQTT client
     mqtt_app_start();

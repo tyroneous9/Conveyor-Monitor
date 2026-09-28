@@ -53,7 +53,7 @@ flowchart TD
 
 ```
 main/            ESP-IDF firmware: interrupt-driven sampling (MPU6050 DATA_RDY + FIFO), window buffering, MQTT publish
-components/      MPU6050 I2C driver + vendored esp-mqtt / ethernet_init
+components/      MPU6050 I2C driver + vendored esp-mqtt
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        labels.py, the classifier, report figures, Notebook
 deploy/          Mosquitto config + systemd unit for running the broker and ingest.py as persistent services on the Pi
