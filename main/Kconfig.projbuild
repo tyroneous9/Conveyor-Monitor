@@ -9,12 +9,9 @@ menu "Conveyor Monitor Project Configuration"
             Default assumes a Mosquitto broker running on the Raspberry Pi
             itself (see deploy/mosquitto/), reachable via the mDNS hostname
             Raspberry Pi OS advertises out of the box (avahi-daemon). If mDNS
-            doesn't resolve on your network (some hotspots/routers block it),
-            replace this with the Pi's LAN IP instead: mqtt://<pi's LAN IP>:1883
+            doesn't resolve on network (some hotspots/routers block it),
+            replace with the Pi's LAN IP instead: mqtt://<pi's LAN IP>:1883
 
-            For quick experiments without standing up a broker at all, a
-            public test broker also works (not private, don't use for real
-            data): mqtt://test.mosquitto.org:1883
 
     config MPU6050_SDA_GPIO
         int "MPU6050 I2C SDA GPIO"
@@ -41,30 +38,32 @@ menu "Conveyor Monitor Project Configuration"
 
     config MPU6050_I2C_FREQ_HZ
         int "MPU6050 I2C bus frequency (Hz)"
-        default 100000
+        default 400000
         help
             I2C clock speed used to talk to the MPU6050.
 
     config SAMPLE_RATE_HZ
         int "Accelerometer sample rate (Hz)"
         default 500
+        range 4 1000
         help
-            Sample rate for the vibration window buffer. This must match
-            the rate MPU6050_SMPLRT_DIV_REG is programmed for in
-            mpu6050_init() (1kHz / (1 + SMPLRT_DIV) with the DLPF enabled) --
-            it's not independently configurable here, since sampling is
-            driven by the sensor's own DATA_RDY interrupt at that rate, not
-            a separately-timed loop on the ESP32 side. Used for the JSON
-            payload's sample_rate_hz field and for picking against Nyquist
-            once target mechanical frequencies (motor RPM, belt-pass
-            frequency) are known.
+            The single source of truth for the sample rate. mpu6050_init()
+            programs the sensor's SMPLRT_DIV register from it
+            (rate = 1kHz / (1 + SMPLRT_DIV) with the DLPF enabled), so it
+            must evenly divide 1000: e.g. 1000, 500, 250, 200, 125, 100.
+            Other values fail the build. Sampling is driven by the sensor's
+            own DATA_RDY interrupt at this rate, and the value is sent as
+            the JSON payload's sample_rate_hz field, which the backend uses
+            for the FFT frequency axis. Keep it above twice the highest
+            mechanical frequency of interest (Nyquist); note the DLPF cuts
+            off at ~184Hz regardless.
 
     config SAMPLE_WINDOW_SIZE
         int "Samples per published window"
         default 256
         help
             Number of samples buffered per axis before publishing one MQTT
-            window as JSON. A power of two is recommended (not required) --
+            window as JSON. A power of two is recommended because
             most FFT implementations are radix-2 and prefer it.
 
 endmenu

@@ -34,6 +34,8 @@
 static const char *TAG = "conveyor_monitor";
 
 #define SAMPLE_RATE_HZ CONFIG_SAMPLE_RATE_HZ
+_Static_assert(MPU6050_BASE_RATE_HZ % SAMPLE_RATE_HZ == 0,
+               "CONFIG_SAMPLE_RATE_HZ must evenly divide MPU6050_BASE_RATE_HZ (1000)");
 #define WINDOW_SIZE CONFIG_SAMPLE_WINDOW_SIZE
 
 // Huge json buffer (can be reduced) in case of large window sizes
@@ -325,6 +327,7 @@ void app_main(void)
         .scl_io_num = CONFIG_MPU6050_SCL_GPIO,
         .i2c_freq_hz = CONFIG_MPU6050_I2C_FREQ_HZ,
         .accel_fs = MPU6050_ACCEL_FS_4G,
+        .sample_rate_hz = SAMPLE_RATE_HZ,
     };
     ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &mpu6050_sensor));
     ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
