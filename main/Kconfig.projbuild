@@ -1,4 +1,4 @@
-menu "Example Configuration"
+menu "Conveyor Monitor Project Configuration"
 
     config EXAMPLE_MQTT_BROKER_URI
         string "MQTT broker URI"
