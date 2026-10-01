@@ -1,4 +1,5 @@
 #include "mpu6050.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -15,7 +16,7 @@ static const char *TAG = "mpu6050";
 #define MPU6050_RESET_BIT           7
 #define MPU6050_ACCEL_XOUT          0x3B // accel registers read from 0x3B to 0x40, x to y to z, each one using 2 bytes
 #define MPU6050_SMPLRT_DIV_REG      0x19 // sample rate divider
-#define MPU6050_CONFIG_REG          0x1A // general config register, holds the DLPF setting
+#define MPU6050_CONFIG_REG          0x1A // general config register, holds digital low pass filter (DLPF) setting
 #define MPU6050_ACCEL_CONFIG_REG    0x1C // accelerometer full-scale range (AFS_SEL lives in bits 4:3)
 #define MPU6050_ACCEL_CONFIG_AFS_SEL_SHIFT 3
 #define MPU6050_INT_ENABLE_REG      0x38 // interrupt source enables
@@ -63,8 +64,38 @@ static float mpu6050_accel_fs_lsb_per_g(mpu6050_accel_fs_t fs)
     return lsb_per_g[fs];
 }
 
+/**
+ * @brief Debug helper: probe every 7-bit I2C address and log which ones ACK.
+ * MPU6050 should show up at 0x68 (AD0 low) or 0x69 (AD0 high)
+ */
+static void mpu6050_scan_bus(i2c_master_bus_handle_t bus_handle)
+{
+    int found = 0;
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    for (uint16_t addr = 0x08; addr < 0x78; addr++) {
+        esp_err_t err = i2c_master_probe(bus_handle, addr, 50);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "  device found at 0x%02X", addr);
+            found++;
+        } else if (err == ESP_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "  bus timed out at 0x%02X and no devices found", addr);
+            return;
+        }
+    }
+    ESP_LOGI(TAG, "Scan done, %d device(s) found", found);
+}
+
 esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_handle)
 {
+    // The sensor can only produce rates of MPU6050_BASE_RATE_HZ / (1 + SMPLRT_DIV), with SMPLRT_DIV in 0..255
+    if (config->sample_rate_hz == 0 || config->sample_rate_hz > MPU6050_BASE_RATE_HZ ||
+        MPU6050_BASE_RATE_HZ % config->sample_rate_hz != 0 ||
+        MPU6050_BASE_RATE_HZ / config->sample_rate_hz - 1 > 255) {
+        ESP_LOGE(TAG, "Sample rate %" PRIu32 " Hz must evenly divide %d Hz",
+                 config->sample_rate_hz, MPU6050_BASE_RATE_HZ);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     struct mpu6050_dev_t *dev = calloc(1, sizeof(*dev));
     if (dev == NULL) {
         return ESP_ERR_NO_MEM;
@@ -83,6 +114,8 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         free(dev);
         return err;
     }
+    
+    mpu6050_scan_bus(dev->bus_handle);
 
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -96,7 +129,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         return err;
     }
 
-    /* Read the MPU6050 WHO_AM_I register, on power up the register should have the value 0x68 */
+    /* Check if MPU6050 is connected by reading the WHO_AM_I register */
     uint8_t who_am_i;
     err = mpu6050_register_read(dev->dev_handle, MPU6050_WHO_AM_I_REG_ADDR, &who_am_i, 1);
     if (err != ESP_OK) {
@@ -105,8 +138,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
     }
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", who_am_i);
 
-    /* Reset the device, then clear the SLEEP bit it powers up (and comes out of
-     * reset) with - SLEEP must be cleared explicitly before it produces data. */
+    // Reset the device, then clear the SLEEP bit*/
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_PWR_MGMT_1_REG_ADDR, 1 << MPU6050_RESET_BIT);
     if (err != ESP_OK) {
         goto fail;
@@ -117,25 +149,17 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         goto fail;
     }
 
-    /* --- Vibration-monitoring configuration ---
-     * Power-on defaults aren't tuned for reading conveyor/bearing vibration,
-     * so set them explicitly. These three settings interact (DLPF picks the
-     * internal rate that SMPLRT_DIV divides down), so they're grouped here. */
-
-    /* DLPF_CFG = 1 selects the second DLPF setting (see datasheet table),
-     * giving roughly a 184Hz bandwidth. That's wide enough to pass typical
-     * bearing-fault harmonics without them being smoothed away, and it also
-     * sets the sensor's internal sample rate to 1kHz (used just below). */
+    // Configure the digital low pass filter (DLPF) to setting 1 (184Hz bandwidth)
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_CONFIG_REG, 1);
     if (err != ESP_OK) {
         goto fail;
     }
 
-    /* Output sample rate = 1kHz / (1 + SMPLRT_DIV) while the DLPF above is
-     * enabled. SMPLRT_DIV = 1 gives 1000 / (1 + 1) = 500Hz, which is well
-     * above 2x the ~184Hz DLPF cutoff so nothing above that cutoff aliases
-     * back down into the frequency range we're actually looking at. */
-    err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_SMPLRT_DIV_REG, 1);
+    /* The Sample Rate is generated by dividing the gyroscope output rate by SMPLRT_DIV:  
+     * Sample Rate = Gyroscope Output Rate / (1 + SMPLRT_DIV) where Gyroscope Output Rate = 8kHz when the DLPF is disabled (DLPF_CFG = 0 or 7),
+     * and 1kHz when the DLPF is enabled (see Register 26) */
+    const uint8_t smplrt_div = MPU6050_BASE_RATE_HZ / config->sample_rate_hz - 1;
+    err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_SMPLRT_DIV_REG, smplrt_div);
     if (err != ESP_OK) {
         goto fail;
     }
@@ -147,6 +171,7 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
     }
 
     dev->accel_lsb_per_g = mpu6050_accel_fs_lsb_per_g(config->accel_fs);
+    ESP_LOGI(TAG, "Sampling at %" PRIu32 " Hz (SMPLRT_DIV=%u)", config->sample_rate_hz, smplrt_div);
 
     *out_handle = dev;
     return ESP_OK;

@@ -16,6 +16,10 @@ typedef enum {
     MPU6050_ACCEL_FS_16G = 3,
 } mpu6050_accel_fs_t;
 
+/* Internal sample clock with the DLPF enabled; the output rate is this
+ * divided by (1 + SMPLRT_DIV), so sample_rate_hz must divide it evenly. */
+#define MPU6050_BASE_RATE_HZ 1000
+
 typedef struct {
     float accel_x, accel_y, accel_z;
 } mpu6050_measurements_t;
@@ -25,13 +29,16 @@ typedef struct {
     int scl_io_num;
     uint32_t i2c_freq_hz;
     mpu6050_accel_fs_t accel_fs;
+    // Must evenly divide MPU6050_BASE_RATE_HZ (e.g. 1000, 500, 250, 200, 100)
+    uint32_t sample_rate_hz;
 } mpu6050_config_t;
 
 typedef struct mpu6050_dev_t *mpu6050_handle_t;
 
 /**
  * @brief Bring up the I2C bus, attach the MPU6050, and configure it for
- * vibration monitoring (DLPF + sample rate tuned for bearing-fault frequencies).
+ * vibration monitoring (DLPF + config->sample_rate_hz). Returns
+ * ESP_ERR_INVALID_ARG if sample_rate_hz doesn't divide MPU6050_BASE_RATE_HZ.
  * On success *out_handle is ready to pass to mpu6050_read_accel().
  */
 esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_handle);
