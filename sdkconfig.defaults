@@ -1,0 +1,5 @@
+# WiFi credentials (placeholders). Set real values locally with
+# `idf.py menuconfig` -> WiFi Configuration; they are stored in the
+# git-ignored sdkconfig, so don't commit them here.
+CONFIG_WIFI_SSID="YOUR_WIFI_SSID"
+CONFIG_WIFI_PASSWORD="YOUR_WIFI_PASSWORD"

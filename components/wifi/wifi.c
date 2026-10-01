@@ -8,7 +8,7 @@
  */
 
 #include "wifi.h"
-
+#include "sdkconfig.h"
 #include <string.h>
 #include <sys/param.h>
 
