@@ -101,9 +101,7 @@ def write_report(rows, threshold, baseline_mean, baseline_std, n_std, n_healthy,
     recall = tp / (tp + fn) if (tp + fn) else float("nan")
 
     lines = [
-        f"Ground truth: {n_healthy} healthy window(s), {n_worn} worn window(s) "
-        "(labeled via analysis/labels.py from operator-recorded recording sessions).",
-        "",
+        f"{n_healthy} healthy window(s), {n_worn} worn window(s) "
         f"Threshold: `{FEATURE_NAME}` > {threshold:.3f} "
         f"(baseline {baseline_mean:.3f} + {n_std:g}×{baseline_std:.3f} std)",
         "",

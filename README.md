@@ -131,11 +131,11 @@ My primary WiFi enforces WPA3-only auth, and this ESP32 doesn't reliably use WPA
 **1. Hann windowing before FFT:**
 `analyze_fft.py` applies a Hann window (`np.hanning`) to each axis before taking the FFT. A raw 256-sample window is not an integer number of vibration cycles, so the edges at its start and end act like a discontinuity. Smoothing the edges with a Hann window trades a small amount of frequency resolution for a much cleaner spectrum.
 
-**2. Band amplitude, not a single bin:**
+**2. Band amplitude instead of single bin:**
 `classify_faults.py` sums FFT magnitude over a frequency band (`band_amplitude`) rather than reading the amplitude of a single bin. At 500Hz over 256 samples, each FFT bin is ~1.95Hz wide, so the true peak can jitter into an adjacent bin between windows. Summing a band around the expected frequency absorbs jitter at the cost of some frequency precision.
 
-**3. Classification uses only the `ay` axis:**
-`analyze_fft.py` stores spectra for `ax`, `ay`, and `az` on every window, but `classify_faults.py`'s band amplitude only reads `fft_ay`. `ay` is the axis most aligned with the conveyor's direction of travel, where belt-pass vibration showed up most strongly. All three axes are still stored so they could be used for other fault detections later on.
+**3. Classification only uses the `ay` axis:**
+`analyze_fft.py` stores spectra for `ax`, `ay`, and `az`, but `classify_faults.py`'s band amplitude only reads `fft_ay`. This is because `ay` is the axis most aligned with the conveyor's direction of travel (due to mount design, not intentional), where belt-pass vibration showed up most strongly. All three axes are still stored so they could be used in the future for other fault detections.
 
 **4. Threshold classification:**
 A statistical threshold is sufficient for the current implementation, but ideally should be changed to a trained model as data becomes more varied and different classifications are needed.
