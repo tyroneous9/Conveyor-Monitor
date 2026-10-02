@@ -342,11 +342,10 @@ void app_main(void)
     ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
     ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
 
-    // Connect to the network. Not fatal if it times out: WiFi keeps retrying in the
-    // background, and the MQTT client reconnects and drains its outbox once it's up
+    // Connect to the network
     wifi_start();
     if (!wifi_wait_connected(pdMS_TO_TICKS(15000))) {
-        ESP_LOGW(TAG, "WiFi not connected yet, continuing (will keep retrying)");
+        ESP_LOGW(TAG, "WiFi not connected yet, retrying");
     }
 
     // Start MQTT client
