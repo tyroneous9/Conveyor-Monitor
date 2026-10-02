@@ -54,9 +54,10 @@ esp_err_t mpu6500_read_accel(mpu6500_handle_t handle, mpu6500_measurements_t *ou
 
 /**
  * @brief Enable the sensor's DATA_RDY interrupt (fires once per internal
- * sample, at the rate mpu6500_init() configured via SMPLRT_DIV). The
- * device's INT pin should be wired to a GPIO configured for edge-triggered
- * interrupts by the caller -- this only turns on the interrupt source
+ * sample, at the rate mpu6500_init() configured via SMPLRT_DIV). INT is
+ * configured active low: it idles high and pulses low for ~50 us per sample,
+ * so the caller should wire it to a GPIO configured for falling-edge
+ * interrupts -- this only turns on the interrupt source
  * inside the sensor itself.
  */
 esp_err_t mpu6500_enable_data_ready_interrupt(mpu6500_handle_t handle);

@@ -46,17 +46,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         ESP_LOGI(TAG, "Connecting to \"%s\"", CONFIG_WIFI_SSID);
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        const wifi_event_sta_disconnected_t *event = event_data;
         xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
-        ESP_LOGW(TAG, "Disconnected (reason %d), retrying in %d ms", event->reason, backoff_ms);
+        ESP_LOGW(TAG, "Disconnected, reconnecting");
 
         // Schedule the retry on a timer instead of sleeping, so the default event loop isn't blocked
         esp_timer_stop(reconnect_timer);
         esp_timer_start_once(reconnect_timer, (uint64_t)backoff_ms * 1000);
         backoff_ms = MIN(backoff_ms * 2, CONFIG_WIFI_MAX_BACKOFF_MS);
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        const ip_event_got_ip_t *event = event_data;
-        ESP_LOGI(TAG, "Got IP " IPSTR, IP2STR(&event->ip_info.ip));
+        // esp_netif already logs the assigned IP
         backoff_ms = WIFI_INITIAL_BACKOFF_MS;
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }

@@ -223,6 +223,9 @@ static void IRAM_ATTR mpu6500_int_isr_handler(void *arg)
 // Limit for samples read in one batch from the MPU6500's FIFO 
 #define FIFO_DRAIN_BATCH_SAMPLES 16
 
+// TEMP FIFO POLLING: drain period. The 512-byte FIFO holds ~170 ms at 500 Hz, so 20 ms leaves ample margin
+#define TEMP_FIFO_POLL_MS 20
+
 
 // RTOS task for sampling the MPU6500 and filling window buffers
 static void sample_task(void *arg)
@@ -233,14 +236,22 @@ static void sample_task(void *arg)
     int active_window_index = -1;
     // Index of next sample to write into the active buffer, reset to 0 for new window.
     int next_sample_index = 0;
+    // TEMP FIFO POLLING: reference point for the fixed-period wakeups below
+    TickType_t last_wake = xTaskGetTickCount();
 
     while (1) {
+        /* TEMP FIFO POLLING: the INT pin isn't pulsing on this board, so drain the FIFO on a timer
+         * instead of waiting for DATA_RDY. The FIFO keeps every sample in order, so timing jitter
+         * here doesn't affect the data. Restore the commented-out block once INT works. */
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TEMP_FIFO_POLL_MS));
+        /*
         // Block until the sensor's INT line pulses for the next sample
         uint32_t pulses_since_last_wake = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (pulses_since_last_wake > 1) {
             ESP_LOGI(TAG, "sample_task woke late (%" PRIu32 " DATA_RDY pulses since last wake) -- draining FIFO",
                       pulses_since_last_wake);
         }
+        */
 
         while (1) {
             mpu6500_measurements_t batch[FIFO_DRAIN_BATCH_SAMPLES];
@@ -369,8 +380,8 @@ void app_main(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        // Set to interrupt on rising edge, since the MPU6500 INT pin is pulled high on sample ready
-        .intr_type = GPIO_INTR_POSEDGE,
+        // Set to interrupt on falling edge, since the MPU6500 INT pin is active low (pulses low on sample ready)
+        .intr_type = GPIO_INTR_NEGEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&int_gpio_cfg));
 

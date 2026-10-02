@@ -22,7 +22,9 @@ static const char *TAG = "mpu6500";
 #define MPU6500_ACCEL_CONFIG_REG    0x1C // accelerometer full-scale range (AFS_SEL lives in bits 4:3)
 #define MPU6500_ACCEL_CONFIG_AFS_SEL_SHIFT 3
 #define MPU6500_ACCEL_CONFIG2_REG   0x1D // MPU6500: accel DLPF (CONFIG's DLPF_CFG only filters the gyro)
-#define MPU6500_ACCEL_DLPF_CFG_218HZ 1   // A_DLPF_CFG=1, ACCEL_FCHOICE_B=0: 218.1 Hz bandwidth, 1 kHz rate
+#define MPU6500_ACCEL_DLPF_CFG_184HZ 1   // A_DLPF_CFG=1, ACCEL_FCHOICE_B=0: 184 Hz bandwidth, 1 kHz rate (reset value 0 = 460 Hz)
+#define MPU6500_INT_PIN_CFG_REG     0x37 // INT pin polarity / drive / latch
+#define MPU6500_INT_PIN_CFG_ACTL_BIT 7   // 1 = active low: pin idles high, pulses low (push-pull, 50 us pulse)
 #define MPU6500_INT_ENABLE_REG      0x38 // interrupt source enables
 #define MPU6500_INT_ENABLE_DATA_RDY_BIT 0 // fires once per internal sample
 #define MPU6500_USER_CTRL_REG       0x6A // FIFO enable/reset live here
@@ -69,34 +71,6 @@ static float mpu6500_accel_fs_lsb_per_g(mpu6500_accel_fs_t fs)
     return lsb_per_g[fs];
 }
 
-/**
- * @brief Debug helper: probe every 7-bit I2C address and log which ones ACK.
- * The sensor should show up at 0x68 (AD0 low) or 0x69 (AD0 high)
- */
-static void mpu6500_scan_bus(i2c_master_bus_handle_t bus_handle)
-{
-    int found = 0;
-    int timeouts = 0;
-    ESP_LOGI(TAG, "Scanning I2C bus...");
-    for (uint16_t addr = 0x08; addr < 0x78; addr++) {
-        esp_err_t err = i2c_master_probe(bus_handle, addr, 50);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "  device found at 0x%02X", addr);
-            found++;
-        } else if (err == ESP_ERR_TIMEOUT) {
-            // The driver resets the bus after a timeout, so later addresses can still answer
-            ESP_LOGW(TAG, "  bus timed out at 0x%02X", addr);
-            timeouts++;
-        }
-    }
-    if (timeouts > 0) {
-        ESP_LOGW(TAG, "Scan done, %d device(s) found, %d address(es) timed out - check wiring and pull-ups",
-                 found, timeouts);
-    } else {
-        ESP_LOGI(TAG, "Scan done, %d device(s) found", found);
-    }
-}
-
 esp_err_t mpu6500_init(const mpu6500_config_t *config, mpu6500_handle_t *out_handle)
 {
     // The sensor can only produce rates of MPU6500_BASE_RATE_HZ / (1 + SMPLRT_DIV), with SMPLRT_DIV in 0..255
@@ -133,8 +107,6 @@ esp_err_t mpu6500_init(const mpu6500_config_t *config, mpu6500_handle_t *out_han
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "I2C bus reset failed: %s", esp_err_to_name(err));
     }
-
-    mpu6500_scan_bus(dev->bus_handle);
 
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -179,8 +151,8 @@ esp_err_t mpu6500_init(const mpu6500_config_t *config, mpu6500_handle_t *out_han
         goto fail;
     }
 
-    // Accel DLPF is configured separately on the MPU6500; 218 Hz is its closest setting to 184 Hz
-    err = mpu6500_register_write_byte(dev->dev_handle, MPU6500_ACCEL_CONFIG2_REG, MPU6500_ACCEL_DLPF_CFG_218HZ);
+    // Accel DLPF is configured separately on the MPU6500; match the gyro's 184 Hz
+    err = mpu6500_register_write_byte(dev->dev_handle, MPU6500_ACCEL_CONFIG2_REG, MPU6500_ACCEL_DLPF_CFG_184HZ);
     if (err != ESP_OK) {
         goto fail;
     }
@@ -233,7 +205,14 @@ esp_err_t mpu6500_read_accel(mpu6500_handle_t handle, mpu6500_measurements_t *ou
 
 esp_err_t mpu6500_enable_data_ready_interrupt(mpu6500_handle_t handle)
 {
-    // Enables INT pin to pull high every time a new sample is ready
+    // Active low: INT idles high and pulses low for ~50 us on each new sample
+    esp_err_t err = mpu6500_register_write_byte(handle->dev_handle, MPU6500_INT_PIN_CFG_REG,
+                                                 1 << MPU6500_INT_PIN_CFG_ACTL_BIT);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // Fire the INT pulse every time a new sample is ready
     return mpu6500_register_write_byte(handle->dev_handle, MPU6500_INT_ENABLE_REG,
                                         1 << MPU6500_INT_ENABLE_DATA_RDY_BIT);
 }
