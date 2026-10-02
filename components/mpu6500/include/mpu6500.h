@@ -85,6 +85,12 @@ esp_err_t mpu6500_enable_fifo(mpu6500_handle_t handle);
 esp_err_t mpu6500_read_fifo_samples(mpu6500_handle_t handle, mpu6500_measurements_t *out_samples,
                                      int max_samples, int *out_n_read);
 
+/**
+ * @brief DEBUG: read INT_STATUS (0x3A). Bit 0 (RAW_DATA_RDY_INT) is set once per
+ * sample, independent of the INT pin. Reading clears the flags.
+ */
+esp_err_t mpu6500_read_int_status(mpu6500_handle_t handle, uint8_t *out_status);
+
 #ifdef __cplusplus
 }
 #endif

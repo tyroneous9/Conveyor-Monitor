@@ -211,6 +211,37 @@ static void publish_task(void *arg)
     }
 }
 
+// ---- DEBUG SAMPLE-RATE TEST: mirrors the sensor's data-ready flag onto a GPIO for a scope ----
+#define DEBUG_RATE_GPIO 18
+#define DEBUG_INT_STATUS_RAW_DATA_RDY 0x01
+
+/* Polls INT_STATUS back-to-back (~0.1 ms per read) and drives DEBUG_RATE_GPIO high for one read
+ * whenever a new sample was flagged, so the pin pulses once per sample at the sensor's own rate.
+ * Edges jitter by up to one read; the scope's averaged frequency is the true sample rate.
+ * The flag stays set until read, so a sample is only missed if this task stalls for > 1 period. */
+static void debug_rate_task(void *arg)
+{
+    (void)arg;
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << DEBUG_RATE_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    ESP_LOGW(TAG, "DEBUG: mirroring sensor data-ready onto GPIO %d", DEBUG_RATE_GPIO);
+
+    while (1) {
+        uint8_t status;
+        if (mpu6500_read_int_status(mpu6500_sensor, &status) != ESP_OK) {
+            gpio_set_level(DEBUG_RATE_GPIO, 0);
+            vTaskDelay(1);
+            continue;
+        }
+        // High for one read after a new sample, low again on the next read (flag cleared by reading)
+        gpio_set_level(DEBUG_RATE_GPIO, (status & DEBUG_INT_STATUS_RAW_DATA_RDY) ? 1 : 0);
+    }
+}
+// ---- end DEBUG SAMPLE-RATE TEST ----
+
 // GPIO ISR handler for MPU6500's INT line
 static void IRAM_ATTR mpu6500_int_isr_handler(void *arg)
 {
@@ -373,6 +404,9 @@ void app_main(void)
     // Create the publish and sample tasks
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
     xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
+    // DEBUG SAMPLE-RATE TEST: above publish_task so JSON formatting can't stall it past a sample period;
+    // it blocks during each I2C read, so it doesn't starve other tasks
+    xTaskCreate(debug_rate_task, "debug_rate_task", 3072, NULL, 7, NULL);
 
     // Configure the MPU6500 INT GPIO pin as an interrupt pin
     const gpio_config_t int_gpio_cfg = {

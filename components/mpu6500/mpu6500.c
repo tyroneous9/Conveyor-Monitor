@@ -26,6 +26,7 @@ static const char *TAG = "mpu6500";
 #define MPU6500_INT_PIN_CFG_REG     0x37 // INT pin polarity / drive / latch
 #define MPU6500_INT_PIN_CFG_ACTL_BIT 7   // 1 = active low: pin idles high, pulses low (push-pull, 50 us pulse)
 #define MPU6500_INT_ENABLE_REG      0x38 // interrupt source enables
+#define MPU6500_INT_STATUS_REG      0x3A // DEBUG: interrupt flags, cleared by reading
 #define MPU6500_INT_ENABLE_DATA_RDY_BIT 0 // fires once per internal sample
 #define MPU6500_USER_CTRL_REG       0x6A // FIFO enable/reset live here
 #define MPU6500_USER_CTRL_FIFO_EN_BIT    6
@@ -314,4 +315,10 @@ esp_err_t mpu6500_read_fifo_samples(mpu6500_handle_t handle, mpu6500_measurement
 
     *out_n_read = n_read;
     return ESP_OK;
+}
+
+// DEBUG: used by the sample-rate test task on the debug branch
+esp_err_t mpu6500_read_int_status(mpu6500_handle_t handle, uint8_t *out_status)
+{
+    return mpu6500_register_read(handle->dev_handle, MPU6500_INT_STATUS_REG, out_status, 1);
 }
