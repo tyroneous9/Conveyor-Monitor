@@ -215,10 +215,11 @@ static void publish_task(void *arg)
 #define DEBUG_RATE_GPIO 18
 #define DEBUG_INT_STATUS_RAW_DATA_RDY 0x01
 
-/* Polls INT_STATUS back-to-back (~0.1 ms per read) and drives DEBUG_RATE_GPIO high for one read
- * whenever a new sample was flagged, so the pin pulses once per sample at the sensor's own rate.
- * Edges jitter by up to one read; the scope's averaged frequency is the true sample rate.
- * The flag stays set until read, so a sample is only missed if this task stalls for > 1 period. */
+/* Polls INT_STATUS back-to-back (~0.1 ms per read) and toggles DEBUG_RATE_GPIO whenever a new
+ * sample was flagged, producing a 50% square wave at HALF the sample rate (~250 Hz for 500 Hz).
+ * A square wave reads reliably on a basic scope or a multimeter's Hz mode; double the reading.
+ * Edges jitter by up to one read; the averaged frequency is exact. The flag stays set until read,
+ * so a sample is only missed if this task stalls for > 1 period. */
 static void debug_rate_task(void *arg)
 {
     (void)arg;
@@ -227,17 +228,20 @@ static void debug_rate_task(void *arg)
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
-    ESP_LOGW(TAG, "DEBUG: mirroring sensor data-ready onto GPIO %d", DEBUG_RATE_GPIO);
+    ESP_LOGW(TAG, "DEBUG: toggling GPIO %d on each sample (square wave at half the sample rate)", DEBUG_RATE_GPIO);
 
+    int level = 0;
     while (1) {
         uint8_t status;
         if (mpu6500_read_int_status(mpu6500_sensor, &status) != ESP_OK) {
-            gpio_set_level(DEBUG_RATE_GPIO, 0);
             vTaskDelay(1);
             continue;
         }
-        // High for one read after a new sample, low again on the next read (flag cleared by reading)
-        gpio_set_level(DEBUG_RATE_GPIO, (status & DEBUG_INT_STATUS_RAW_DATA_RDY) ? 1 : 0);
+        // Flip on each new sample (reading cleared the flag, so each sample is seen once)
+        if (status & DEBUG_INT_STATUS_RAW_DATA_RDY) {
+            level = !level;
+            gpio_set_level(DEBUG_RATE_GPIO, level);
+        }
     }
 }
 // ---- end DEBUG SAMPLE-RATE TEST ----
@@ -403,10 +407,14 @@ void app_main(void)
 
     // Create the publish and sample tasks
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
-    xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
-    // DEBUG SAMPLE-RATE TEST: above publish_task so JSON formatting can't stall it past a sample period;
-    // it blocks during each I2C read, so it doesn't starve other tasks
+    /* DEBUG SAMPLE-RATE TEST: the test task reads I2C back-to-back, which starves any lower-priority
+     * I2C user (sample_task's FIFO reads timed out), and running below other tasks would make it miss
+     * samples. So it runs alone: no sample_task, and no INT ISR (its handler notifies sample_task).
+     * publish_task just idles waiting for windows. */
+    // xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
+    (void)sample_task; // still compiled, just not started
     xTaskCreate(debug_rate_task, "debug_rate_task", 3072, NULL, 7, NULL);
+    return;
 
     // Configure the MPU6500 INT GPIO pin as an interrupt pin
     const gpio_config_t int_gpio_cfg = {
