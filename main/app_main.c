@@ -4,7 +4,7 @@
  * Logic:
  *   1. Connects to WiFi (SSID/password from Kconfig)
  *   2. Connects to MQTT broker
- *   3. Samples MPU6050
+ *   3. Samples MPU6500
  *   4. Publishes sampled data to the MQTT broker as JSON
  */
 
@@ -27,15 +27,15 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
-#include "mpu6050.h"
+#include "mpu6500.h"
 #include "mqtt_client.h"
 #include "wifi.h"
 
 static const char *TAG = "conveyor_monitor";
 
 #define SAMPLE_RATE_HZ CONFIG_SAMPLE_RATE_HZ
-_Static_assert(MPU6050_BASE_RATE_HZ % SAMPLE_RATE_HZ == 0,
-               "CONFIG_SAMPLE_RATE_HZ must evenly divide MPU6050_BASE_RATE_HZ (1000)");
+_Static_assert(MPU6500_BASE_RATE_HZ % SAMPLE_RATE_HZ == 0,
+               "CONFIG_SAMPLE_RATE_HZ must evenly divide MPU6500_BASE_RATE_HZ (1000)");
 #define WINDOW_SIZE CONFIG_SAMPLE_WINDOW_SIZE
 
 // Huge json buffer (can be reduced) in case of large window sizes
@@ -51,7 +51,7 @@ typedef struct {
 
 static esp_mqtt_client_handle_t mqtt_client;
 static volatile bool mqtt_is_connected;
-static mpu6050_handle_t mpu6050_sensor;
+static mpu6500_handle_t mpu6500_sensor;
 static TaskHandle_t sample_task_handle;
 static char window_json_buf[JSON_BUFFER_SIZE];
 
@@ -211,8 +211,8 @@ static void publish_task(void *arg)
     }
 }
 
-// GPIO ISR handler for MPU6050's INT line
-static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
+// GPIO ISR handler for MPU6500's INT line
+static void IRAM_ATTR mpu6500_int_isr_handler(void *arg)
 {
     (void)arg;
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -220,11 +220,11 @@ static void IRAM_ATTR mpu6050_int_isr_handler(void *arg)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-// Limit for samples read in one batch from the MPU6050's FIFO 
+// Limit for samples read in one batch from the MPU6500's FIFO 
 #define FIFO_DRAIN_BATCH_SAMPLES 16
 
 
-// RTOS task for sampling the MPU6050 and filling window buffers
+// RTOS task for sampling the MPU6500 and filling window buffers
 static void sample_task(void *arg)
 {
     (void)arg;
@@ -243,12 +243,12 @@ static void sample_task(void *arg)
         }
 
         while (1) {
-            mpu6050_measurements_t batch[FIFO_DRAIN_BATCH_SAMPLES];
+            mpu6500_measurements_t batch[FIFO_DRAIN_BATCH_SAMPLES];
             int n_read;
-            esp_err_t err = mpu6050_read_fifo_samples(mpu6050_sensor, batch, FIFO_DRAIN_BATCH_SAMPLES, &n_read);
-            if (err == MPU6050_ERR_FIFO_OVERFLOW) {
+            esp_err_t err = mpu6500_read_fifo_samples(mpu6500_sensor, batch, FIFO_DRAIN_BATCH_SAMPLES, &n_read);
+            if (err == MPU6500_ERR_FIFO_OVERFLOW) {
                 // Samples were lost, so the partial window has a gap in it. Discard it and start fresh.
-                ESP_LOGW(TAG, "MPU6050 FIFO overflowed, discarding partial window");
+                ESP_LOGW(TAG, "MPU6500 FIFO overflowed, discarding partial window");
                 if (active_window_index >= 0) {
                     xQueueSend(free_buffer_queue, &active_window_index, 0);
                     active_window_index = -1;
@@ -256,7 +256,7 @@ static void sample_task(void *arg)
                 break;
             }
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to read MPU6050 FIFO: %s", esp_err_to_name(err));
+                ESP_LOGW(TAG, "Failed to read MPU6500 FIFO: %s", esp_err_to_name(err));
                 break;
             }
             if (n_read == 0) {
@@ -331,16 +331,16 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    const mpu6050_config_t mpu6050_cfg = {
-        .sda_io_num = CONFIG_MPU6050_SDA_GPIO,
-        .scl_io_num = CONFIG_MPU6050_SCL_GPIO,
-        .i2c_freq_hz = CONFIG_MPU6050_I2C_FREQ_HZ,
-        .accel_fs = MPU6050_ACCEL_FS_4G,
+    const mpu6500_config_t mpu6500_cfg = {
+        .sda_io_num = CONFIG_MPU6500_SDA_GPIO,
+        .scl_io_num = CONFIG_MPU6500_SCL_GPIO,
+        .i2c_freq_hz = CONFIG_MPU6500_I2C_FREQ_HZ,
+        .accel_fs = MPU6500_ACCEL_FS_4G,
         .sample_rate_hz = SAMPLE_RATE_HZ,
     };
-    ESP_ERROR_CHECK(mpu6050_init(&mpu6050_cfg, &mpu6050_sensor));
-    ESP_ERROR_CHECK(mpu6050_enable_fifo(mpu6050_sensor));
-    ESP_ERROR_CHECK(mpu6050_enable_data_ready_interrupt(mpu6050_sensor));
+    ESP_ERROR_CHECK(mpu6500_init(&mpu6500_cfg, &mpu6500_sensor));
+    ESP_ERROR_CHECK(mpu6500_enable_fifo(mpu6500_sensor));
+    ESP_ERROR_CHECK(mpu6500_enable_data_ready_interrupt(mpu6500_sensor));
 
     // Connect to the network
     wifi_start();
@@ -363,13 +363,13 @@ void app_main(void)
     xTaskCreate(publish_task, "publish_task", 4096, NULL, 5, NULL);
     xTaskCreate(sample_task, "sample_task", 4096, NULL, 6, &sample_task_handle);
 
-    // Configure the MPU6050 INT GPIO pin as an interrupt pin
+    // Configure the MPU6500 INT GPIO pin as an interrupt pin
     const gpio_config_t int_gpio_cfg = {
-        .pin_bit_mask = 1ULL << CONFIG_MPU6050_INT_GPIO,
+        .pin_bit_mask = 1ULL << CONFIG_MPU6500_INT_GPIO,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        // Set to interrupt on rising edge, since the MPU6050 INT pin is pulled high on sample ready
+        // Set to interrupt on rising edge, since the MPU6500 INT pin is pulled high on sample ready
         .intr_type = GPIO_INTR_POSEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&int_gpio_cfg));
@@ -377,6 +377,6 @@ void app_main(void)
     // Install the GPIO ISR service to watch for interrupts
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
 
-    // Register mpu6050_int_isr_handler to be called on interrupts from CONFIG_MPU6050_INT_GPIO
-    ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_MPU6050_INT_GPIO, mpu6050_int_isr_handler, NULL));
+    // Register mpu6500_int_isr_handler to be called on interrupts from CONFIG_MPU6500_INT_GPIO
+    ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_MPU6500_INT_GPIO, mpu6500_int_isr_handler, NULL));
 }

@@ -13,41 +13,41 @@ menu "Conveyor Monitor Project Configuration"
             replace with the Pi's LAN IP instead: mqtt://<pi's LAN IP>:1883
 
 
-    config MPU6050_SDA_GPIO
-        int "MPU6050 I2C SDA GPIO"
+    config MPU6500_SDA_GPIO
+        int "MPU6500 I2C SDA GPIO"
         default 21
         help
-            GPIO connected to the MPU6050's SDA pin.
+            GPIO connected to the MPU6500's SDA pin.
 
-    config MPU6050_SCL_GPIO
-        int "MPU6050 I2C SCL GPIO"
+    config MPU6500_SCL_GPIO
+        int "MPU6500 I2C SCL GPIO"
         default 22
         help
-            GPIO connected to the MPU6050's SCL pin.
+            GPIO connected to the MPU6500's SCL pin.
 
-    config MPU6050_INT_GPIO
-        int "MPU6050 INT GPIO"
+    config MPU6500_INT_GPIO
+        int "MPU6500 INT GPIO"
         default 4
         help
-            GPIO connected to the MPU6050's INT pin. The sensor pulses this
+            GPIO connected to the MPU6500's INT pin. The sensor pulses this
             line once per internal sample (DATA_RDY, enabled in
-            mpu6050_enable_data_ready_interrupt()); app_main.c attaches a
+            mpu6500_enable_data_ready_interrupt()); app_main.c attaches a
             GPIO ISR here that wakes sample_task, so sampling is driven by
             the sensor's own hardware interrupt rather than a software
             timer.
 
-    config MPU6050_I2C_FREQ_HZ
-        int "MPU6050 I2C bus frequency (Hz)"
+    config MPU6500_I2C_FREQ_HZ
+        int "MPU6500 I2C bus frequency (Hz)"
         default 400000
         help
-            I2C clock speed used to talk to the MPU6050.
+            I2C clock speed used to talk to the MPU6500.
 
     config SAMPLE_RATE_HZ
         int "Accelerometer sample rate (Hz)"
         default 500
         range 4 1000
         help
-            The single source of truth for the sample rate. mpu6050_init()
+            The single source of truth for the sample rate. mpu6500_init()
             programs the sensor's SMPLRT_DIV register from it
             (rate = 1kHz / (1 + SMPLRT_DIV) with the DLPF enabled), so it
             must evenly divide 1000: e.g. 1000, 500, 250, 200, 125, 100.

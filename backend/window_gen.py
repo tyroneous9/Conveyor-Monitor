@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthetic raw-window generator, for exercising analyze_fft.py and
-analysis/classify_faults.py without real ESP32 + MPU6050 hardware.
+analysis/classify_faults.py without real ESP32 + MPU6500 hardware.
 
 Modeled on the two vibration sources documented in the README's "Analysis
 results": motor rotation (~29.3Hz, present at similar amplitude regardless

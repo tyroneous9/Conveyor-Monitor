@@ -1,6 +1,6 @@
 # Conveyor Monitor
 
-Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off an MPU6050 accelerometer, streams it over MQTT to a Raspberry Pi, and analyzes this data using FFT to predict belt wear.
+Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off an MPU6500 accelerometer, streams it over MQTT to a Raspberry Pi, and analyzes this data using FFT to predict belt wear.
 
 ![Physical setup](analysis/figures/physical_setup.png)
 
@@ -8,7 +8,7 @@ Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off
 
 **ESP32:** built-in WiFi, well documented and supported with a vendor framework (ESP-IDF), available as both a dev board (used here) and a bare chip for eventual production use, and cheap in bulk.
 
-**MPU6050:** the ESP32 has mature I2C drivers for it and the documentation shows how to use it directly, its sample rate is adequate for the target vibration frequencies, and it's cheap.
+**MPU6500:** the ESP32 has mature I2C drivers for it and the documentation shows how to use it directly, its sample rate is adequate for the target vibration frequencies, and it's cheap.
 
 **Raspberry Pi 5:** acts as the central device that receives and stores data from every ESP32 on the line. In production deployment this needs to be low-power and physically close to the sensors it's collecting from. A cheaper device could have been used, but the Pi 5 is what I already had.
 
@@ -18,7 +18,7 @@ Fault classifier for an industrial conveyor belt: an ESP32 samples vibration off
 
 ```mermaid
 flowchart TD
-    MPU["MPU6050<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware"]
+    MPU["MPU6500<br/>accelerometer"] -->|I2C| ESP["ESP32 firmware"]
     ESP -->|"publish window"| Broker["MQTT broker"]
     Broker --> Ingest["ingest.py"]
     Ingest -->|raw_windows| DB[("SQLite")]
@@ -31,7 +31,7 @@ flowchart TD
 
 **Explanation:**
 
-1. The MPU6050 measures vibration along three axes (x, y, z). This data is sampled by the ESP32 at an exact 500Hz. Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
+1. The MPU6500 measures vibration along three axes (x, y, z). This data is sampled by the ESP32 at an exact 500Hz. Samples are batched into windows, which are published as JSON to Mosquitto, a MQTT broker.
 
     - A sample is one accelerometer reading: one instance of `(x, y, z)`. The ESP32 takes one every 2ms (500Hz).
 
@@ -52,8 +52,8 @@ flowchart TD
 ## Repo layout
 
 ```
-main/            ESP-IDF firmware: interrupt-driven sampling (MPU6050 DATA_RDY + FIFO), window buffering, MQTT publish
-components/      MPU6050 I2C driver, WiFi station bring-up + vendored esp-mqtt
+main/            ESP-IDF firmware: interrupt-driven sampling (MPU6500 DATA_RDY + FIFO), window buffering, MQTT publish
+components/      MPU6500 I2C driver, WiFi station bring-up + vendored esp-mqtt
 backend/         ingest.py, analyze_fft.py, storage.py (SQLite schema)
 analysis/        labels.py, the classifier, report figures, Notebook
 deploy/          Mosquitto config + systemd unit for running the broker and ingest.py as persistent services on the Pi
@@ -101,11 +101,11 @@ Every baseline and prediction also gets saved to the `baselines` / `classificati
 **1. Sampling uses interrupts and a double buffer:**
 The first attempt at sampling was a simple loop with a delay (`vTaskDelay`), but the rate was off, which I confirmed directly with an oscilloscope. This board's FreeRTOS tick only runs at 100Hz, 10ms resolution. This means trying to sample at 500Hz (2ms) is impossible with such a delay, as it will be rounded up to 10ms minimum. In practice, sampling must be deferred to its own task.
 
-The second attempt replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick, reading samples in a dedicated, high-priority `sample_task` with a precise timer. That fixed the rate problem, but left two issues: first, the ESP32's timer period and the MPU6050's own internal output rate (`SMPLRT_DIV`) were two independently configured values with nothing forcing them to agree.  This coupling is a problem for scalability if sample rate were to change in the future. Second, even if the rate is precise, this independent task could still be stalled, which is explained in the next version.
+The second attempt replaced the delay with `esp_timer`, a hardware timer independent of the FreeRTOS tick, reading samples in a dedicated, high-priority `sample_task` with a precise timer. That fixed the rate problem, but left two issues: first, the ESP32's timer period and the MPU6500's own internal output rate (`SMPLRT_DIV`) were two independently configured values with nothing forcing them to agree.  This coupling is a problem for scalability if sample rate were to change in the future. Second, even if the rate is precise, this independent task could still be stalled, which is explained in the next version.
 
-The current version wires the MPU6050's INT pin to a GPIO and enables its DATA_RDY interrupt instead, so the sensor triggers the ESP32 exactly when a new sample exists, via a GPIO ISR (`mpu6050_int_isr_handler`) that wakes a dedicated `sample_task`. Additionally, the sensor's onboard FIFO now buffers samples to prevent data loss when the CPU is stalled. The queue can hold up to 512 bytes on the MPU6500, which at the current 6 bytes per sample, is equivalent to 85 samples (170 ms at 500 Hz) before overflow.
+The current version wires the MPU6500's INT pin to a GPIO and enables its DATA_RDY interrupt instead, so the sensor triggers the ESP32 exactly when a new sample exists, via a GPIO ISR (`mpu6500_int_isr_handler`) that wakes a dedicated `sample_task`. Additionally, the sensor's onboard FIFO now buffers samples to prevent data loss when the CPU is stalled. The queue can hold up to 512 bytes on the MPU6500, which at the current 6 bytes per sample, is equivalent to 85 samples (170 ms at 500 Hz) before overflow.
 
-Why is CPU stalled? `sample_task` can still occasionally be delayed by a few milliseconds. The WiFi/lwIP internals MQTT depends on run at a higher FreeRTOS priority than sample_task, and are able to interrupt it. Rather than ONLY reading the MPU6050's live accelerometer registers (which get overwritten by the next read, so a delay would drop samples), `sample_task` enables the sensor's onboard FIFO and reads everything currently buffered. A brief delay now costs latency, but not lost data.
+Why is CPU stalled? `sample_task` can still occasionally be delayed by a few milliseconds. The WiFi/lwIP internals MQTT depends on run at a higher FreeRTOS priority than sample_task, and are able to interrupt it. Rather than ONLY reading the MPU6500's live accelerometer registers (which get overwritten by the next read, so a delay would drop samples), `sample_task` enables the sensor's onboard FIFO and reads everything currently buffered. A brief delay now costs latency, but not lost data.
 
 **2. Sampling and MQTT share a double buffer:**
 
