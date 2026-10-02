@@ -55,8 +55,8 @@ menu "Conveyor Monitor Project Configuration"
             own DATA_RDY interrupt at this rate, and the value is sent as
             the JSON payload's sample_rate_hz field, which the backend uses
             for the FFT frequency axis. Keep it above twice the highest
-            mechanical frequency of interest (Nyquist); note the DLPF cuts
-            off at ~184Hz regardless.
+            mechanical frequency of interest (Nyquist); note the accel DLPF
+            cuts off at ~218Hz regardless.
 
     config SAMPLE_WINDOW_SIZE
         int "Samples per published window"

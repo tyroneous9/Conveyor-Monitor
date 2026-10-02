@@ -20,6 +20,9 @@ typedef enum {
  * divided by (1 + SMPLRT_DIV), so sample_rate_hz must divide it evenly. */
 #define MPU6050_BASE_RATE_HZ 1000
 
+/* Returned by mpu6050_read_fifo_samples() when the FIFO overflowed. */
+#define MPU6050_ERR_FIFO_OVERFLOW ESP_ERR_INVALID_STATE
+
 typedef struct {
     float accel_x, accel_y, accel_z;
 } mpu6050_measurements_t;
@@ -39,6 +42,7 @@ typedef struct mpu6050_dev_t *mpu6050_handle_t;
  * @brief Bring up the I2C bus, attach the MPU6050, and configure it for
  * vibration monitoring (DLPF + config->sample_rate_hz). Returns
  * ESP_ERR_INVALID_ARG if sample_rate_hz doesn't divide MPU6050_BASE_RATE_HZ.
+ * An unexpected WHO_AM_I value is only logged as a warning.
  * On success *out_handle is ready to pass to mpu6050_read_accel().
  */
 esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_handle);
@@ -72,6 +76,10 @@ esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle);
  * in the sensor's FIFO into out_samples (oldest first), converted to g.
  * *out_n_read is set to how many were actually available (0 if the FIFO
  * was empty) -- always <= max_samples.
+ * Returns MPU6050_ERR_FIFO_OVERFLOW if the FIFO filled up before it was
+ * drained (512 bytes on the MPU6500): samples were
+ * lost, so the FIFO has been reset and *out_n_read is 0. Samples read
+ * before and after an overflow are not contiguous.
  */
 esp_err_t mpu6050_read_fifo_samples(mpu6050_handle_t handle, mpu6050_measurements_t *out_samples,
                                      int max_samples, int *out_n_read);

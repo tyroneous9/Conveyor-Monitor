@@ -10,15 +10,19 @@ static const char *TAG = "mpu6050";
 
 #define MPU6050_TIMEOUT_MS          1000
 
-#define MPU6050_SENSOR_ADDR         0x68        /*!< Address of the MPU6050 sensor */
+#define MPU6050_SENSOR_ADDR         0x68        /*!< I2C address of the sensor (AD0 low) */
 #define MPU6050_WHO_AM_I_REG_ADDR   0x75        /*!< Register addresses of the "who am I" register */
+#define MPU6050_WHO_AM_I_VALUE      0x70        // MPU6500 (a genuine MPU6050 reports 0x68)
 #define MPU6050_PWR_MGMT_1_REG_ADDR 0x6B        /*!< Register addresses of the power management register */
 #define MPU6050_RESET_BIT           7
+#define MPU6050_PWR_MGMT_1_CLKSEL_AUTO 1 // MPU6500: use the gyro PLL when ready (more accurate than the internal oscillator)
 #define MPU6050_ACCEL_XOUT          0x3B // accel registers read from 0x3B to 0x40, x to y to z, each one using 2 bytes
 #define MPU6050_SMPLRT_DIV_REG      0x19 // sample rate divider
 #define MPU6050_CONFIG_REG          0x1A // general config register, holds digital low pass filter (DLPF) setting
 #define MPU6050_ACCEL_CONFIG_REG    0x1C // accelerometer full-scale range (AFS_SEL lives in bits 4:3)
 #define MPU6050_ACCEL_CONFIG_AFS_SEL_SHIFT 3
+#define MPU6050_ACCEL_CONFIG2_REG   0x1D // MPU6500: accel DLPF (CONFIG's DLPF_CFG only filters the gyro)
+#define MPU6050_ACCEL_DLPF_CFG_218HZ 1   // A_DLPF_CFG=1, ACCEL_FCHOICE_B=0: 218.1 Hz bandwidth, 1 kHz rate
 #define MPU6050_INT_ENABLE_REG      0x38 // interrupt source enables
 #define MPU6050_INT_ENABLE_DATA_RDY_BIT 0 // fires once per internal sample
 #define MPU6050_USER_CTRL_REG       0x6A // FIFO enable/reset live here
@@ -29,6 +33,7 @@ static const char *TAG = "mpu6050";
 #define MPU6050_FIFO_COUNT_H_REG    0x72 // 16-bit big-endian byte count currently in the FIFO
 #define MPU6050_FIFO_R_W_REG        0x74 // read this address repeatedly to drain the FIFO
 #define MPU6050_FIFO_SAMPLE_BYTES  6 // one accel sample = 3 axes x 2 bytes
+#define MPU6050_FIFO_SIZE_BYTES    512 // MPU6500 FIFO (the MPU6050's is 1024)
 #define MPU6050_FIFO_READ_CHUNK_SAMPLES 16 // bounds the on-stack scratch buffer below regardless of backlog size
 
 struct mpu6050_dev_t {
@@ -66,11 +71,12 @@ static float mpu6050_accel_fs_lsb_per_g(mpu6050_accel_fs_t fs)
 
 /**
  * @brief Debug helper: probe every 7-bit I2C address and log which ones ACK.
- * MPU6050 should show up at 0x68 (AD0 low) or 0x69 (AD0 high)
+ * The sensor should show up at 0x68 (AD0 low) or 0x69 (AD0 high)
  */
 static void mpu6050_scan_bus(i2c_master_bus_handle_t bus_handle)
 {
     int found = 0;
+    int timeouts = 0;
     ESP_LOGI(TAG, "Scanning I2C bus...");
     for (uint16_t addr = 0x08; addr < 0x78; addr++) {
         esp_err_t err = i2c_master_probe(bus_handle, addr, 50);
@@ -78,11 +84,17 @@ static void mpu6050_scan_bus(i2c_master_bus_handle_t bus_handle)
             ESP_LOGI(TAG, "  device found at 0x%02X", addr);
             found++;
         } else if (err == ESP_ERR_TIMEOUT) {
-            ESP_LOGE(TAG, "  bus timed out at 0x%02X and no devices found", addr);
-            return;
+            // The driver resets the bus after a timeout, so later addresses can still answer
+            ESP_LOGW(TAG, "  bus timed out at 0x%02X", addr);
+            timeouts++;
         }
     }
-    ESP_LOGI(TAG, "Scan done, %d device(s) found", found);
+    if (timeouts > 0) {
+        ESP_LOGW(TAG, "Scan done, %d device(s) found, %d address(es) timed out - check wiring and pull-ups",
+                 found, timeouts);
+    } else {
+        ESP_LOGI(TAG, "Scan done, %d device(s) found", found);
+    }
 }
 
 esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_handle)
@@ -114,7 +126,14 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         free(dev);
         return err;
     }
-    
+
+    /* If the ESP32 was reset mid-transfer while the sensor stayed powered (e.g. after
+     * flashing), the sensor can still be holding SDA low. Clock it free before first use. */
+    err = i2c_master_bus_reset(dev->bus_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C bus reset failed: %s", esp_err_to_name(err));
+    }
+
     mpu6050_scan_bus(dev->bus_handle);
 
     i2c_device_config_t dev_config = {
@@ -136,28 +155,38 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config, mpu6050_handle_t *out_han
         ESP_LOGE(TAG, "Failed to read WHO_AM_I - check wiring, power, and pull-ups");
         goto fail;
     }
-    ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", who_am_i);
+    if (who_am_i != MPU6050_WHO_AM_I_VALUE) {
+        ESP_LOGW(TAG, "Unexpected WHO_AM_I = 0x%02X (expected 0x%02X), continuing anyway", who_am_i,
+                 MPU6050_WHO_AM_I_VALUE);
+    } else {
+        ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", who_am_i);
+    }
 
-    // Reset the device, then clear the SLEEP bit*/
+    // Reset the device, then clear the SLEEP bit and select the PLL clock
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_PWR_MGMT_1_REG_ADDR, 1 << MPU6050_RESET_BIT);
     if (err != ESP_OK) {
         goto fail;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
-    err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_PWR_MGMT_1_REG_ADDR, 0);
+    err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_PWR_MGMT_1_REG_ADDR, MPU6050_PWR_MGMT_1_CLKSEL_AUTO);
     if (err != ESP_OK) {
         goto fail;
     }
 
-    // Configure the digital low pass filter (DLPF) to setting 1 (184Hz bandwidth)
+    // Gyro DLPF setting 1 (184 Hz). This also sets the 1 kHz internal rate that SMPLRT_DIV divides
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_CONFIG_REG, 1);
     if (err != ESP_OK) {
         goto fail;
     }
 
-    /* The Sample Rate is generated by dividing the gyroscope output rate by SMPLRT_DIV:  
-     * Sample Rate = Gyroscope Output Rate / (1 + SMPLRT_DIV) where Gyroscope Output Rate = 8kHz when the DLPF is disabled (DLPF_CFG = 0 or 7),
-     * and 1kHz when the DLPF is enabled (see Register 26) */
+    // Accel DLPF is configured separately on the MPU6500; 218 Hz is its closest setting to 184 Hz
+    err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_ACCEL_CONFIG2_REG, MPU6050_ACCEL_DLPF_CFG_218HZ);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+
+    /* Sample Rate = Internal Sample Rate / (1 + SMPLRT_DIV), where the internal rate is 1 kHz
+     * while the gyro DLPF is enabled (DLPF_CFG 1-6, FCHOICE_B = 0). SMPLRT_DIV has no effect otherwise */
     const uint8_t smplrt_div = MPU6050_BASE_RATE_HZ / config->sample_rate_hz - 1;
     err = mpu6050_register_write_byte(dev->dev_handle, MPU6050_SMPLRT_DIV_REG, smplrt_div);
     if (err != ESP_OK) {
@@ -209,29 +238,40 @@ esp_err_t mpu6050_enable_data_ready_interrupt(mpu6050_handle_t handle)
                                         1 << MPU6050_INT_ENABLE_DATA_RDY_BIT);
 }
 
-esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle)
+/**
+ * @brief Empty the FIFO and start filling it again.
+ * FIFO_RESET only takes effect while FIFO_EN is 0, so the FIFO is disabled first.
+ */
+static esp_err_t mpu6050_fifo_restart(mpu6050_handle_t handle)
 {
-    // Enable FIFO: samples can be stored in sensor's onboard queue
+    esp_err_t err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG, 0);
+    if (err != ESP_OK) {
+        return err;
+    }
 
-    esp_err_t err;
-    
-    // Reset FIFO to clear any old samples
     err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
                                        1 << MPU6050_USER_CTRL_FIFO_RESET_BIT);
     if (err != ESP_OK) {
         return err;
     }
 
+    return mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
+                                        1 << MPU6050_USER_CTRL_FIFO_EN_BIT);
+}
+
+esp_err_t mpu6050_enable_fifo(mpu6050_handle_t handle)
+{
+    // Enable FIFO: samples can be stored in sensor's onboard queue
+
     // Choose which data stream is read into FIFO. In this case, only accel data is needed
-    err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_FIFO_EN_REG,
-                                       1 << MPU6050_FIFO_EN_ACCEL_BIT);
+    esp_err_t err = mpu6050_register_write_byte(handle->dev_handle, MPU6050_FIFO_EN_REG,
+                                                 1 << MPU6050_FIFO_EN_ACCEL_BIT);
     if (err != ESP_OK) {
         return err;
     }
 
-    // Enable FIFO so data can start getting stored automatically
-    return mpu6050_register_write_byte(handle->dev_handle, MPU6050_USER_CTRL_REG,
-                                        1 << MPU6050_USER_CTRL_FIFO_EN_BIT);
+    // Clear any old samples and start storing new ones automatically
+    return mpu6050_fifo_restart(handle);
 }
 
 static esp_err_t mpu6050_read_fifo_count(mpu6050_handle_t handle, uint16_t *out_count)
@@ -252,6 +292,15 @@ esp_err_t mpu6050_read_fifo_samples(mpu6050_handle_t handle, mpu6050_measurement
     esp_err_t err = mpu6050_read_fifo_count(handle, &fifo_bytes);
     if (err != ESP_OK) {
         return err;
+    }
+
+    /* The FIFO size isn't a multiple of the 6-byte sample, so a count at capacity means a
+     * sample was partially overwritten and every read from here on would be misaligned
+     * (axes shifted). Throw the contents away and start clean. */
+    if (fifo_bytes >= MPU6050_FIFO_SIZE_BYTES) {
+        *out_n_read = 0;
+        err = mpu6050_fifo_restart(handle);
+        return err != ESP_OK ? err : MPU6050_ERR_FIFO_OVERFLOW;
     }
 
     int available = fifo_bytes / MPU6050_FIFO_SAMPLE_BYTES;

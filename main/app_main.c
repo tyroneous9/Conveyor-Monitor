@@ -246,6 +246,15 @@ static void sample_task(void *arg)
             mpu6050_measurements_t batch[FIFO_DRAIN_BATCH_SAMPLES];
             int n_read;
             esp_err_t err = mpu6050_read_fifo_samples(mpu6050_sensor, batch, FIFO_DRAIN_BATCH_SAMPLES, &n_read);
+            if (err == MPU6050_ERR_FIFO_OVERFLOW) {
+                // Samples were lost, so the partial window has a gap in it. Discard it and start fresh.
+                ESP_LOGW(TAG, "MPU6050 FIFO overflowed, discarding partial window");
+                if (active_window_index >= 0) {
+                    xQueueSend(free_buffer_queue, &active_window_index, 0);
+                    active_window_index = -1;
+                }
+                break;
+            }
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to read MPU6050 FIFO: %s", esp_err_to_name(err));
                 break;
